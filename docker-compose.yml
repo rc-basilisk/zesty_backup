@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  zesty-backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zesty-backup:latest
+    container_name: zesty-backup
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+      - /path/to/backup:/backup:ro  # Mount the directory you want to backup (read-only)
+    environment:
+      - RUST_LOG=info
+      - CONFIG_PATH=/app/config/config.toml
+      # Add provider-specific environment variables if needed
+      # - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gcs-credentials.json
+      # - AZURE_STORAGE_ACCOUNT_KEY=your-key
+      # - DB_PASSWORD=your-db-password
+    command: daemon --backup-interval 6 --upload-interval 24 --pid-file /tmp/zesty-backup.pid --config /app/config/config.toml
+    # Uncomment to run as specific user
+    # user: "1000:1000"
+

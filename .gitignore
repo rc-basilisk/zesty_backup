@@ -1,0 +1,63 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Config files with credentials
+config.toml
+*.toml.local
+config.toml.bak
+
+# Backups
+/backups/
+*.tar.zst
+*.tar.gz
+*.tar
+
+# Logs
+/logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+.directory
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# PID files
+*.pid
+
+# Restored files
+/restored/
+
+# Test artifacts
+/test-output/
+*.test
+
+# Documentation build
+/doc/
+
+# Coverage reports
+/coverage/
+*.gcda
+*.gcno
+*.profdata
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+

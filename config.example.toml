@@ -1,0 +1,162 @@
+# Zesty Backup System Configuration
+# Multi-provider cloud backup utility
+
+[storage]
+# Provider: s3, aws, contabo, digitalocean, wasabi, minio, r2, gcs, google, azure, b2, backblaze
+provider = "s3"
+
+# For S3-compatible providers (AWS, Contabo, DigitalOcean Spaces, Wasabi, MinIO, Cloudflare R2)
+# Leave endpoint empty for AWS (it will be auto-generated)
+# For S3-compatible services, set the endpoint URL
+endpoint = "https://s3.amazonaws.com"
+region = "us-east-1"
+bucket = "your-bucket-name"
+access_key = "your-access-key"
+secret_key = "your-secret-key"
+
+# For Google Cloud Storage (enterprise)
+# provider = "gcs"  # or "google"
+# bucket = "my-backups"
+# credentials_path = "/path/to/service-account-key.json"  # Optional: uses GOOGLE_APPLICATION_CREDENTIALS env var if not set
+
+# For Azure Blob Storage (enterprise)
+# provider = "azure"
+# account_name = "your-account-name"
+# account_key = "your-account-key"  # Optional: can also use AZURE_STORAGE_ACCOUNT_KEY env var
+# bucket = "my-container"  # Azure uses "container" instead of "bucket"
+
+# For Backblaze B2 (uncomment and configure)
+# account_id = "your-account-id"
+# application_key = "your-application-key"
+# bucket_id = "your-bucket-id"
+
+# For Google Drive (consumer-grade)
+# provider = "googledrive"  # or "gdrive"
+# access_key = "ya29.a0AfH6SMC..."  # OAuth2 access token
+# bucket_id = "folder-id-here"  # Optional: Google Drive folder ID
+
+# For OneDrive (consumer-grade)
+# provider = "onedrive"
+# access_key = "eyJ0eXAiOiJKV1QiLCJub..."  # OAuth2 access token
+# bucket_id = "/drive/root:/Backups"  # Optional: folder path
+
+# For Dropbox (consumer-grade)
+# provider = "dropbox"
+# access_key = "sl.Bk..."  # Dropbox access token
+# bucket_id = "/Backups"  # Optional: folder path
+
+# For Box (consumer-grade)
+# provider = "box"
+# access_key = "T9cE5asOhuy8CC6..."  # OAuth2 access token
+# bucket_id = "123456789"  # Optional: folder ID
+
+# For pCloud (consumer-grade)
+# provider = "pcloud"
+# access_key = "your-api-access-token"  # Get from https://my.pcloud.com/#page=apikeys
+# region = "us"  # "us" (default) or "eu" for European data center
+# bucket_id = "/Backups"  # Optional: folder path
+
+# For MEGA (requires MEGAcmd - install from https://mega.nz/cmd)
+# provider = "mega"
+# account_name = "your-email@example.com"  # MEGA email
+# account_key = "your-password"  # MEGA password
+# bucket_id = "/Backups"  # Optional: folder path
+
+[backup]
+# Local backup directory
+local_backup_dir = "./backups"
+
+# Main project path to backup
+project_path = "/path/to/your/project"
+
+# Additional paths to include (files or directories)
+additional_paths = [
+    # "/etc/nginx/nginx.conf",
+    # "/etc/nginx/sites-available/your-site",
+]
+
+# Incremental backups per day (local)
+incremental_per_day = 4
+
+# Upload to cloud storage interval in hours
+upload_interval_hours = 24
+
+# Retention: keep backups for N days
+retention_days = 7
+
+# Compression level (0-22, higher = better compression but slower)
+# Recommended: 3 for balanced speed/compression, 22 for maximum compression
+compression_level = 3
+compression_format = "zst"
+
+# Paths to exclude from backup (patterns)
+exclude = [
+    # "node_modules",
+    # ".git",
+    # "*.log",
+]
+
+[database]
+# Database backup (optional)
+# Supported types: postgres, mariadb, mysql, mongodb, cassandra, scylla, redis, sqlite
+enabled = false
+# type = "postgres"  # Default: postgres
+# host = "localhost"
+# port = 5432
+# database = "your_database"
+# username = "your_user"
+# password = "your_password"  # Optional: can also use DB_PASSWORD env var or .env file
+
+[system]
+# Systemd services to backup (optional)
+systemd_services = [
+    # "your-service.service",
+]
+
+# Systemd timers to backup (optional)
+systemd_timers = [
+    # "your-timer.timer",
+]
+
+# Command outputs to capture (general pattern for any command)
+# This allows you to backup the output of any command as a text file
+command_outputs = [
+    # { command = "docker", args = ["ps", "-a"], output_file = "docker_containers.txt", enabled = true },
+    # { command = "systemctl", args = ["list-units", "--type=service"], output_file = "systemd_services.txt", enabled = false },
+]
+
+# Presets for common backup scenarios
+[system.presets]
+# Nginx configuration presets
+nginx_enabled = false  # Backup /etc/nginx/nginx.conf and sites-available/enabled
+nginx_sites = [
+    # "example.com",
+    # "another-site.com",
+]
+
+# Crontab backup
+crontab_enabled = false
+# crontab_user = null  # null = current user, or specify username like "www-data"
+
+# User config files (from home directory)
+user_configs = [
+    # ".zshrc",
+    # ".bashrc",
+    # ".vimrc",
+    # ".gitconfig",
+]
+# user_configs_home = null  # null = $HOME, or specify path like "/home/username"
+
+# Common /etc files and directories
+etc_files = [
+    # "hosts",
+    # "fstab",
+]
+etc_dirs = [
+    # "ssl",
+    # "letsencrypt",
+]
+
+[logging]
+level = "info"
+log_dir = "./logs"

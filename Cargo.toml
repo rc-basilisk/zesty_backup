@@ -1,0 +1,61 @@
+[package]
+name = "zesty-backup"
+version = "1.0.0"
+edition = "2021"
+description = "A flexible, multi-provider backup utility for cloud storage"
+license = "MIT"
+repository = "https://github.com/rc-basilisk/zesty-backup"
+authors = ["Your Name <admin@zetsubou.life>"]
+keywords = ["backup", "cloud-storage", "s3", "gcs", "azure", "blob-storage", "backup-utility"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+exclude = [
+    "config.toml",
+    "*.toml.local",
+    "backups/",
+    "logs/",
+    "restored/",
+    ".env",
+    ".env.local",
+]
+
+[[bin]]
+name = "zesty-backup"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+aws-sdk-s3 = "1.20"
+aws-config = { version = "1.1", features = ["behavior-version-latest"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+flate2 = "1.0"
+tar = "0.4"
+walkdir = "2.4"
+futures = "0.3"
+zstd = "0.13"
+aws-credential-types = "1.2.9"
+# Backblaze B2
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+base64 = "0.21"
+sha1 = { version = "0.10", features = ["std"] }
+async-trait = "0.1"
+# Google Cloud Storage and Azure (using object_store for unified interface)
+object_store = { version = "0.12", features = ["gcp", "azure"] }
+google-cloud-storage = "0.11"
+azure_storage_blobs = "0.17"
+azure_identity = "0.20"
+
+# Consumer-grade cloud storage providers
+oauth2 = { version = "4.4", features = ["reqwest"] }
+url = "2.5"
+which = "5.0"
+
+[dev-dependencies]
+tempfile = "3.8"
