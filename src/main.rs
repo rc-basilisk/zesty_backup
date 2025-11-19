@@ -453,10 +453,7 @@ impl BackupManager {
 
         // Get exclude patterns from config
         let exclude_patterns = if let Some(ref config) = self.config {
-            config
-                .backup
-                .exclude.as_deref()
-                .unwrap_or(&[])
+            config.backup.exclude.as_deref().unwrap_or(&[])
         } else {
             &[]
         };
