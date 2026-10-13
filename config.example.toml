@@ -1,162 +1,136 @@
-# Zesty Backup System Configuration
-# Multi-provider cloud backup utility
+# Zesty Backup configuration
+#
+# Copy this file to config.toml, fill in the [storage] and [backup] sections,
+# and protect it:  chmod 600 config.toml   (it contains credentials)
+#
+# Only [storage] and [backup] are required. Everything else is optional.
+# Lines starting with # are comments.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [storage]: where backups are uploaded
+#
+# Pick ONE provider. Ready-to-copy examples for every provider are in the
+# README ("Storage providers" section). The fields each provider needs:
+#
+#   s3 / aws ........ bucket, region, access_key, secret_key (keys optional on AWS: IAM role / ~/.aws work too)
+#   contabo, minio .. endpoint, bucket, access_key, secret_key
+#   digitalocean .... region (e.g. "nyc3"), bucket, access_key, secret_key
+#   wasabi .......... region (e.g. "eu-central-1"), bucket, access_key, secret_key
+#   r2 .............. account_id, bucket, access_key, secret_key
+#   gcs ............. bucket, credentials_path (or GOOGLE_APPLICATION_CREDENTIALS)
+#   azure ........... account_name, account_key, bucket (= container name)
+#   b2 .............. account_id (keyID), application_key, bucket (name)
+#   googledrive, onedrive, dropbox, box .. refresh_token + client_id (+ client_secret), bucket_id (folder)
+#   pcloud .......... access_key (OAuth token), region ("us" or "eu"), bucket_id (folder)
+#   mega ............ bucket_id (folder); needs MEGAcmd installed
+# ─────────────────────────────────────────────────────────────────────────────
 [storage]
-# Provider: s3, aws, contabo, digitalocean, wasabi, minio, r2, gcs, google, azure, b2, backblaze
 provider = "s3"
-
-# For S3-compatible providers (AWS, Contabo, DigitalOcean Spaces, Wasabi, MinIO, Cloudflare R2)
-# Leave endpoint empty for AWS (it will be auto-generated)
-# For S3-compatible services, set the endpoint URL
-endpoint = "https://s3.amazonaws.com"
 region = "us-east-1"
 bucket = "your-bucket-name"
 access_key = "your-access-key"
 secret_key = "your-secret-key"
+# endpoint = "https://..."   # only for S3-compatible services (not needed for AWS)
 
-# For Google Cloud Storage (enterprise)
-# provider = "gcs"  # or "google"
-# bucket = "my-backups"
-# credentials_path = "/path/to/service-account-key.json"  # Optional: uses GOOGLE_APPLICATION_CREDENTIALS env var if not set
-
-# For Azure Blob Storage (enterprise)
-# provider = "azure"
-# account_name = "your-account-name"
-# account_key = "your-account-key"  # Optional: can also use AZURE_STORAGE_ACCOUNT_KEY env var
-# bucket = "my-container"  # Azure uses "container" instead of "bucket"
-
-# For Backblaze B2 (uncomment and configure)
-# account_id = "your-account-id"
-# application_key = "your-application-key"
-# bucket_id = "your-bucket-id"
-
-# For Google Drive (consumer-grade)
-# provider = "googledrive"  # or "gdrive"
-# access_key = "ya29.a0AfH6SMC..."  # OAuth2 access token
-# bucket_id = "folder-id-here"  # Optional: Google Drive folder ID
-
-# For OneDrive (consumer-grade)
-# provider = "onedrive"
-# access_key = "eyJ0eXAiOiJKV1QiLCJub..."  # OAuth2 access token
-# bucket_id = "/drive/root:/Backups"  # Optional: folder path
-
-# For Dropbox (consumer-grade)
-# provider = "dropbox"
-# access_key = "sl.Bk..."  # Dropbox access token
-# bucket_id = "/Backups"  # Optional: folder path
-
-# For Box (consumer-grade)
-# provider = "box"
-# access_key = "T9cE5asOhuy8CC6..."  # OAuth2 access token
-# bucket_id = "123456789"  # Optional: folder ID
-
-# For pCloud (consumer-grade)
-# provider = "pcloud"
-# access_key = "your-api-access-token"  # Get from https://my.pcloud.com/#page=apikeys
-# region = "us"  # "us" (default) or "eu" for European data center
-# bucket_id = "/Backups"  # Optional: folder path
-
-# For MEGA (requires MEGAcmd - install from https://mega.nz/cmd)
-# provider = "mega"
-# account_name = "your-email@example.com"  # MEGA email
-# account_key = "your-password"  # MEGA password
-# bucket_id = "/Backups"  # Optional: folder path
-
+# ─────────────────────────────────────────────────────────────────────────────
+# [backup]: what to back up and how long to keep it
+# ─────────────────────────────────────────────────────────────────────────────
 [backup]
-# Local backup directory
+# Where archives are written before upload.
 local_backup_dir = "./backups"
 
-# Main project path to backup
+# The main directory to back up. Stored in the archive as project/<folder name>/
 project_path = "/path/to/your/project"
 
-# Additional paths to include (files or directories)
+# Extra files or directories. Stored as system/<name>
 additional_paths = [
     # "/etc/nginx/nginx.conf",
-    # "/etc/nginx/sites-available/your-site",
 ]
 
-# Incremental backups per day (local)
-incremental_per_day = 4
-
-# Upload to cloud storage interval in hours
-upload_interval_hours = 24
-
-# Retention: keep backups for N days
-retention_days = 7
-
-# Compression level (0-22, higher = better compression but slower)
-# Recommended: 3 for balanced speed/compression, 22 for maximum compression
-compression_level = 3
-compression_format = "zst"
-
-# Paths to exclude from backup (patterns)
+# Skip these. A name or glob without "/" matches at any depth
+# ("node_modules", "*.log", ".git"); a pattern with "/" matches a path
+# relative to the directory being backed up ("storage/cache/*").
 exclude = [
     # "node_modules",
     # ".git",
     # "*.log",
 ]
 
+# Delete backups older than this many days (local and remote) when running
+# `zesty-backup clean` or the daemon. The newest backup is always kept.
+retention_days = 7
+
+# zstd compression level, 1 (fastest) to 22 (smallest). 3 is a good default.
+compression_level = 3
+
+# Daemon schedule (can be overridden with --backup-interval / --upload-interval):
+incremental_per_day = 4     # backups per day -> one every 24/4 = 6 hours
+upload_interval_hours = 24  # upload new backups (then clean old ones) every 24 hours
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [database]: optional database dump, stored in the archive under database/
+# Supported types: postgres, mysql, mariadb, mongodb, redis, sqlite,
+#                  cassandra / scylla (schema only)
+# The matching tool must be installed (pg_dump, mysqldump, mongodump, ...).
+# ─────────────────────────────────────────────────────────────────────────────
 [database]
-# Database backup (optional)
-# Supported types: postgres, mariadb, mysql, mongodb, cassandra, scylla, redis, sqlite
 enabled = false
-# type = "postgres"  # Default: postgres
+# type = "postgres"
 # host = "localhost"
 # port = 5432
-# database = "your_database"
+# database = "your_database"       # for sqlite: path to the .db file
 # username = "your_user"
-# password = "your_password"  # Optional: can also use DB_PASSWORD env var or .env file
+# password = "your_password"       # or the DB_PASSWORD env var, or DATABASE_URL in <project_path>/.env
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [system]: optional system files and command outputs
+# ─────────────────────────────────────────────────────────────────────────────
 [system]
-# Systemd services to backup (optional)
+# Unit files from /etc/systemd/system/
 systemd_services = [
-    # "your-service.service",
+    # "myapp.service",
 ]
-
-# Systemd timers to backup (optional)
 systemd_timers = [
-    # "your-timer.timer",
+    # "myapp-cleanup.timer",
 ]
 
-# Command outputs to capture (general pattern for any command)
-# This allows you to backup the output of any command as a text file
+# Save the output of commands as text files (under commands/ in the archive).
 command_outputs = [
-    # { command = "docker", args = ["ps", "-a"], output_file = "docker_containers.txt", enabled = true },
-    # { command = "systemctl", args = ["list-units", "--type=service"], output_file = "systemd_services.txt", enabled = false },
+    # { command = "docker", args = ["ps", "-a"], output_file = "docker_containers.txt" },
+    # { command = "dpkg", args = ["-l"], output_file = "packages.txt", enabled = false },
 ]
 
-# Presets for common backup scenarios
 [system.presets]
-# Nginx configuration presets
-nginx_enabled = false  # Backup /etc/nginx/nginx.conf and sites-available/enabled
+# /etc/nginx/nginx.conf plus sites-available/ and sites-enabled/
+nginx_enabled = false
+# ...or only some sites (used when nginx_enabled = false)
 nginx_sites = [
     # "example.com",
-    # "another-site.com",
 ]
 
-# Crontab backup
+# Output of `crontab -l`
 crontab_enabled = false
-# crontab_user = null  # null = current user, or specify username like "www-data"
+# crontab_user = "www-data"        # default: the user running zesty-backup
 
-# User config files (from home directory)
+# Dotfiles from a home directory (stored under user-configs/)
 user_configs = [
-    # ".zshrc",
     # ".bashrc",
-    # ".vimrc",
     # ".gitconfig",
 ]
-# user_configs_home = null  # null = $HOME, or specify path like "/home/username"
+# user_configs_home = "/home/someone"   # default: $HOME
 
-# Common /etc files and directories
+# Files and directories under /etc (stored under etc/)
 etc_files = [
     # "hosts",
     # "fstab",
 ]
 etc_dirs = [
-    # "ssl",
     # "letsencrypt",
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [logging]: optional
+# ─────────────────────────────────────────────────────────────────────────────
 [logging]
-level = "info"
-log_dir = "./logs"
+level = "info"        # trace, debug, info, warn, error (RUST_LOG overrides this)
+log_dir = "./logs"    # also write logs to <log_dir>/zesty-backup.log (read with `zesty-backup logs`)

@@ -1,131 +1,252 @@
-// Backup functionality integration tests
+//! End-to-end tests of the backup workflow, using a local directory as "cloud storage".
 
+use anyhow::Result;
+use async_trait::async_trait;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+use zesty_backup::archive;
+use zesty_backup::backup;
+use zesty_backup::config::AppConfig;
+use zesty_backup::providers::{BackupItem, StorageProvider};
 
-/// Test backup file naming
-#[test]
-fn test_backup_file_naming() {
-    use chrono::Local;
+/// A StorageProvider that stores objects as files in a directory.
+struct DirProvider(PathBuf);
 
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-    let full_backup = format!("backup-full-{}.tar.zst", timestamp);
-    let incr_backup = format!("backup-incr-{}.tar.zst", timestamp);
-
-    assert!(full_backup.starts_with("backup-full-"));
-    assert!(full_backup.ends_with(".tar.zst"));
-    assert!(incr_backup.starts_with("backup-incr-"));
-    assert!(incr_backup.ends_with(".tar.zst"));
-}
-
-/// Test backup directory structure creation
-#[test]
-fn test_backup_directory_creation() {
-    let temp_dir = TempDir::new().unwrap();
-    let backup_dir = temp_dir.path().join("backups");
-
-    fs::create_dir_all(&backup_dir).unwrap();
-    assert!(backup_dir.exists());
-
-    // Create a test backup file
-    let backup_file = backup_dir.join("test-backup.tar.zst");
-    fs::write(&backup_file, b"test backup content").unwrap();
-    assert!(backup_file.exists());
-}
-
-/// Test compression level validation
-#[test]
-fn test_compression_level_validation() {
-    let valid_levels = vec![0, 3, 6, 9, 12, 15, 18, 22];
-    let invalid_levels = vec![-1, 23, 100];
-
-    for level in valid_levels {
-        assert!(level >= 0 && level <= 22, "Level {} should be valid", level);
+#[async_trait]
+impl StorageProvider for DirProvider {
+    async fn upload(&self, key: &str, file_path: &Path) -> Result<()> {
+        let dest = self.0.join(key);
+        fs::create_dir_all(dest.parent().unwrap())?;
+        fs::copy(file_path, dest)?;
+        Ok(())
     }
-
-    for level in invalid_levels {
-        assert!(level < 0 || level > 22, "Level {} should be invalid", level);
+    async fn download(&self, key: &str, output_path: &Path) -> Result<()> {
+        fs::copy(self.0.join(key), output_path)?;
+        Ok(())
     }
-}
-
-/// Test retention policy calculation
-#[test]
-fn test_retention_policy() {
-    use chrono::{Duration, Utc};
-
-    let retention_days = 7;
-    let cutoff_date = Utc::now() - Duration::days(retention_days);
-
-    // Simulate backup dates
-    let old_backup_date = Utc::now() - Duration::days(10);
-    let new_backup_date = Utc::now() - Duration::days(3);
-
-    assert!(
-        old_backup_date < cutoff_date,
-        "Old backup should be deleted"
-    );
-    assert!(new_backup_date > cutoff_date, "New backup should be kept");
-}
-
-/// Test path exclusion logic
-#[test]
-fn test_path_exclusion() {
-    let exclude_patterns = vec!["node_modules", "*.log", ".git"];
-    let test_paths = vec![
-        ("/project/node_modules/package", true),
-        ("/project/src/main.rs", false),
-        ("/project/app.log", true),
-        ("/project/.git/config", true),
-        ("/project/data.txt", false),
-    ];
-
-    for (path, should_exclude) in test_paths {
-        let excluded = exclude_patterns.iter().any(|pattern| {
-            if pattern.starts_with("*.") {
-                path.ends_with(&pattern[1..])
-            } else {
-                path.contains(pattern)
+    async fn list(&self, prefix: &str) -> Result<Vec<BackupItem>> {
+        let dir = self.0.join(prefix);
+        let mut items = Vec::new();
+        if dir.exists() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                items.push(BackupItem {
+                    key: format!("{}{}", prefix, entry.file_name().to_string_lossy()),
+                    size: meta.len(),
+                    last_modified: Some(meta.modified()?.into()),
+                });
             }
-        });
+        }
+        Ok(items)
+    }
+    async fn delete(&self, key: &str) -> Result<()> {
+        fs::remove_file(self.0.join(key))?;
+        Ok(())
+    }
+}
 
+struct Fixture {
+    dir: TempDir,
+    config: AppConfig,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("myapp");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(project.join("empty")).unwrap();
+        fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(project.join("node_modules/pkg/index.js"), "x").unwrap();
+        fs::write(project.join("debug.log"), "noise").unwrap();
+        // A file big enough to span several zstd blocks.
+        fs::write(
+            project.join("data.bin"),
+            (0..2_000_000u32)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(project.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+            fs::set_permissions(project.join("run.sh"), fs::Permissions::from_mode(0o750)).unwrap();
+            std::os::unix::fs::symlink("src/main.rs", project.join("link.rs")).unwrap();
+        }
+        let extra = dir.path().join("nginx.conf");
+        fs::write(&extra, "events {}").unwrap();
+
+        let config = AppConfig::parse(&format!(
+            r#"
+            [storage]
+            provider = "s3"
+            bucket = "unused"
+            [backup]
+            # inside the project on purpose: must not be backed up into itself
+            local_backup_dir = "{project}/backups"
+            project_path = "{project}"
+            additional_paths = ["{extra}", "/does/not/exist"]
+            retention_days = 7
+            exclude = ["node_modules", "*.log"]
+            [system]
+            command_outputs = [{{ command = "echo", args = ["hello"], output_file = "echo.txt" }}]
+            "#,
+            project = project.display(),
+            extra = extra.display(),
+        ))
+        .unwrap();
+        Self { dir, config }
+    }
+
+    fn path(&self, p: &str) -> PathBuf {
+        self.dir.path().join(p)
+    }
+}
+
+#[test]
+fn backup_restore_roundtrip() {
+    let fx = Fixture::new();
+    let archive_path = backup::create_backup(&fx.config, true).unwrap();
+    let name = archive_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        name.starts_with("backup-full-") && name.ends_with(".tar.zst"),
+        "{}",
+        name
+    );
+    assert!(!archive_path.with_extension("zst.partial").exists());
+
+    assert!(archive::verify(&archive_path).unwrap() > 0);
+
+    let out = fx.path("restored");
+    archive::extract(&archive_path, &out).unwrap();
+    let root = out.join("project/myapp");
+    assert_eq!(
+        fs::read_to_string(root.join("src/main.rs")).unwrap(),
+        "fn main() {}"
+    );
+    assert_eq!(fs::read(root.join("data.bin")).unwrap().len(), 2_000_000);
+    assert!(root.join("empty").is_dir(), "empty directories are kept");
+    assert!(!root.join("node_modules").exists(), "excluded directory");
+    assert!(!root.join("debug.log").exists(), "excluded glob");
+    assert!(
+        !root.join("backups").exists(),
+        "backup dir must not be in the backup"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("system/nginx.conf")).unwrap(),
+        "events {}"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("commands/echo.txt")).unwrap(),
+        "hello\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o750, "permissions are preserved");
+        let archive_mode = fs::metadata(&archive_path).unwrap().permissions().mode();
+        assert_eq!(archive_mode & 0o777, 0o600, "archives are private");
+        let link = fs::read_link(root.join("link.rs")).unwrap();
         assert_eq!(
-            excluded, should_exclude,
-            "Path {} exclusion check failed",
-            path
+            link,
+            Path::new("src/main.rs"),
+            "symlinks are kept as symlinks"
         );
     }
 }
 
-/// Test backup file size calculation
 #[test]
-fn test_backup_file_size() {
-    let temp_dir = TempDir::new().unwrap();
-    let test_file = temp_dir.path().join("test.txt");
-    let content = "This is test content for backup size calculation";
-
-    fs::write(&test_file, content).unwrap();
-    let metadata = fs::metadata(&test_file).unwrap();
-
-    assert!(metadata.len() > 0);
-    assert_eq!(metadata.len(), content.len() as u64);
+fn truncated_archive_fails_verification() {
+    let fx = Fixture::new();
+    let archive_path = backup::create_backup(&fx.config, false).unwrap();
+    let data = fs::read(&archive_path).unwrap();
+    fs::write(&archive_path, &data[..data.len() / 2]).unwrap();
+    assert!(archive::verify(&archive_path).is_err());
 }
 
-/// Test timestamp parsing for backup files
-#[test]
-fn test_backup_timestamp_parsing() {
-    use chrono::NaiveDateTime;
+#[tokio::test]
+async fn upload_list_download_clean() {
+    let fx = Fixture::new();
+    let remote = DirProvider(fx.path("remote"));
+    let backup_dir = PathBuf::from(&fx.config.backup.local_backup_dir);
+    fs::create_dir_all(&backup_dir).unwrap();
 
-    let backup_name = "backup-full-20240101-120000.tar.zst";
-    let timestamp_str = backup_name
-        .strip_prefix("backup-full-")
-        .unwrap()
-        .strip_suffix(".tar.zst")
+    // Two old backups and a current one.
+    for name in [
+        "backup-incr-20200101-000000.tar.zst",
+        "backup-full-20200102-000000.tar.zst",
+    ] {
+        fs::write(backup_dir.join(name), name).unwrap();
+    }
+    fs::write(backup_dir.join("unrelated.txt"), "keep me").unwrap();
+    let current = backup::create_backup(&fx.config, false).unwrap();
+    let current_name = current.file_name().unwrap().to_string_lossy().to_string();
+
+    assert_eq!(backup::upload(&remote, &fx.config, None).await.unwrap(), 3);
+    // Already uploaded: nothing to do the second time.
+    assert_eq!(backup::upload(&remote, &fx.config, None).await.unwrap(), 0);
+
+    let listed = backup::remote_backups(&remote).await.unwrap();
+    assert_eq!(listed.len(), 3);
+    assert_eq!(
+        listed[0].key, "backups/backup-incr-20200101-000000.tar.zst",
+        "oldest first"
+    );
+    assert_eq!(listed[2].key, format!("backups/{}", current_name));
+
+    let downloaded = backup::download(&remote, &current_name, &fx.path("dl"))
+        .await
         .unwrap();
+    assert_eq!(fs::read(&downloaded).unwrap(), fs::read(&current).unwrap());
+    assert!(
+        backup::download(&remote, "../../etc/passwd", &fx.path("dl"))
+            .await
+            .is_err()
+    );
 
-    let parsed = NaiveDateTime::parse_from_str(timestamp_str, "%Y%m%d-%H%M%S");
-    assert!(parsed.is_ok());
+    // Dry run deletes nothing.
+    backup::clean(Some(&remote), &fx.config, true)
+        .await
+        .unwrap();
+    assert_eq!(backup::local_backups(&backup_dir).unwrap().len(), 3);
 
-    let dt = parsed.unwrap();
-    assert_eq!(dt.format("%Y%m%d-%H%M%S").to_string(), timestamp_str);
+    // Old local backups go (by name timestamp); unrelated files stay.
+    backup::clean(Some(&remote), &fx.config, false)
+        .await
+        .unwrap();
+    let local = backup::local_backups(&backup_dir).unwrap();
+    assert_eq!(local, vec![current.clone()]);
+    assert!(backup_dir.join("unrelated.txt").exists());
+    // Remote files were all just written, so they are within the retention period.
+    assert_eq!(backup::remote_backups(&remote).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn clean_always_keeps_newest_backup() {
+    let fx = Fixture::new();
+    let backup_dir = PathBuf::from(&fx.config.backup.local_backup_dir);
+    fs::create_dir_all(&backup_dir).unwrap();
+    for name in [
+        "backup-incr-20200101-000000.tar.zst",
+        "backup-incr-20200102-000000.tar.zst",
+    ] {
+        fs::write(backup_dir.join(name), name).unwrap();
+    }
+    backup::clean(None, &fx.config, false).await.unwrap();
+    let left = backup::local_backups(&backup_dir).unwrap();
+    assert_eq!(left.len(), 1);
+    assert!(left[0].ends_with("backup-incr-20200102-000000.tar.zst"));
 }

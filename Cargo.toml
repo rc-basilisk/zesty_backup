@@ -2,9 +2,10 @@
 name = "zesty-backup"
 version = "1.0.2"
 edition = "2021"
+rust-version = "1.88"
 description = "A flexible, multi-provider backup utility for cloud storage"
 license = "MIT"
-repository = "https://github.com/rc-basilisk/zesty-backup"
+repository = "https://github.com/rc-basilisk/zesty_backup"
 authors = ["Basilisk <admin@zetsubou.life>"]
 keywords = ["backup", "cloud-storage", "s3", "blob-storage", "backup-utility"]
 categories = ["command-line-utilities", "development-tools"]
@@ -23,39 +24,38 @@ exclude = [
 name = "zesty-backup"
 path = "src/main.rs"
 
+[lib]
+name = "zesty_backup"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 aws-sdk-s3 = { version = "1.20", features = ["behavior-version-latest"] }
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
+aws-credential-types = "1.2.9"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-flate2 = "1.0"
 tar = "0.4"
 walkdir = "2.4"
+globset = "0.4"
 futures = "0.3"
 zstd = "0.13"
-aws-credential-types = "1.2.9"
-# Backblaze B2
-reqwest = { version = "0.11", features = ["json", "multipart"] }
-base64 = "0.21"
-sha1 = { version = "0.10", features = ["std"] }
+tempfile = "3.8"
 async-trait = "0.1"
-# Google Cloud Storage and Azure (using object_store for unified interface)
-object_store = { version = "0.12", features = ["gcp", "azure"] }
-google-cloud-storage = "0.11"
-azure_storage_blobs = "0.17"
-azure_identity = "0.20"
-
-# Consumer-grade cloud storage providers
-oauth2 = { version = "4.4", features = ["reqwest"] }
 url = "2.5"
 which = "5.0"
-
-[dev-dependencies]
-tempfile = "3.8"
+bytes = "1"
+# HTTP client for the REST-based providers (B2, Google Drive, OneDrive, Dropbox, Box, pCloud).
+# Same major version as the one object_store already pulls in, and rustls so no system OpenSSL is needed.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
+base64 = "0.22"
+sha1 = "0.10"
+# Google Cloud Storage and Azure Blob Storage
+object_store = { version = "0.12", features = ["gcp", "azure"] }

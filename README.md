@@ -1,629 +1,510 @@
 # Zesty Backup
 
-[![CI](https://github.com/rc-basilisk/zesty-backup/workflows/CI/badge.svg)](https://github.com/rc-basilisk/zesty-backup/actions)
-[![Crates.io](https://img.shields.io/crates/v/zesty-backup.svg)](https://crates.io/crates/zesty-backup)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/rc-basilisk/zesty_backup/actions/workflows/ci.yml/badge.svg)](https://github.com/rc-basilisk/zesty_backup/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A flexible, multi-provider backup utility for cloud storage, written in Rust. Supports multiple cloud storage providers including AWS S3, Google Cloud Storage, Azure Blob Storage, Backblaze B2, and S3-compatible services.
+Back up a server (a project folder, config files, a database) into compressed
+`.tar.zst` archives, then send them to cloud storage: S3 and S3-compatible
+services, Google Cloud Storage, Azure, Backblaze B2, Google Drive, OneDrive,
+Dropbox, Box, pCloud or MEGA.
 
-## Features
+It ships as one binary. You can run each step by hand or leave it running as a daemon.
 
-- ✅ **Multiple Storage Providers**: AWS S3, Google Cloud Storage, Azure Blob Storage, Backblaze B2, and S3-compatible services (Contabo, DigitalOcean Spaces, Wasabi, MinIO, Cloudflare R2)
-- ✅ **Flexible Configuration**: Easy-to-use TOML configuration file
-- ✅ **Incremental Backups**: Efficient local backups with configurable frequency
-- ✅ **Automatic Cloud Upload**: Scheduled uploads to your chosen cloud provider
-- ✅ **Retention Policies**: Automatic cleanup of old backups (local and remote)
-- ✅ **High Compression**: zstd compression with configurable levels (0-22)
-- ✅ **Database Backup**: Optional PostgreSQL database backup
-- ✅ **Systemd Integration**: Optional backup of systemd services and timers
-- ✅ **Client Mode**: Download and restore backups from any machine
-- ✅ **Daemon Mode**: Run as a background service with scheduled backups
+```text
+ project folder ┐
+ extra files    ├──▶  backup-incr-20250101-120000.tar.zst  ──▶  cloud storage
+ database dump  │        (local_backup_dir)                       (backups/…)
+ /etc, crontab… ┘
+```
 
-## Supported Providers
+## Contents
 
-### S3-Compatible Providers (Fully Supported)
-- **AWS S3**: Set `provider = "aws"` or `provider = "s3"`
-- **Contabo Object Storage**: Set `provider = "contabo"`
-- **DigitalOcean Spaces**: Set `provider = "digitalocean"`
-- **Wasabi**: Set `provider = "wasabi"` ✅ Fully supported (S3-compatible)
-- **MinIO**: Set `provider = "minio"`
-- **Cloudflare R2**: Set `provider = "r2"`
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Storage providers](#storage-providers)
+- [Running on a schedule](#running-on-a-schedule)
+- [Restoring a backup](#restoring-a-backup)
+- [Docker](#docker)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
-### Enterprise Cloud Storage
-- **Backblaze B2**: Set `provider = "b2"` or `provider = "backblaze"` ✅ Fully supported
-- **Google Cloud Storage**: Set `provider = "gcs"` or `provider = "google"` ✅ Fully supported
-- **Azure Blob Storage**: Set `provider = "azure"` ✅ Fully supported
+## Quick start
 
-### Consumer-Grade Cloud Storage (Fully Supported)
-- **Google Drive**: Set `provider = "googledrive"` or `provider = "gdrive"` ✅ Fully supported
-- **OneDrive**: Set `provider = "onedrive"` ✅ Fully supported
-- **Dropbox**: Set `provider = "dropbox"` ✅ Fully supported
-- **Box**: Set `provider = "box"` ✅ Fully supported
-- **pCloud**: Set `provider = "pcloud"` ✅ Fully supported
-- **MEGA**: Set `provider = "mega"` ✅ Fully supported (requires MEGAcmd)
-
-> **Note**: 
-> - Consumer-grade providers require OAuth2 access tokens (see configuration examples)
-> - MEGA requires MEGAcmd to be installed (handles client-side encryption automatically)
-> - GCS requires service account credentials (see configuration examples)
-> - Azure requires storage account name and access key (see configuration examples)
-
-## Installation
-
-### Prerequisites
-
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))
-- For PostgreSQL backups: `pg_dump` installed
-- For MEGA provider: [MEGAcmd](https://mega.nz/cmd) installed and in PATH
-- For GCS provider: Service account credentials (JSON key file) from [Google Cloud Console](https://console.cloud.google.com/)
-- For Azure provider: Storage account name and access key from [Azure Portal](https://portal.azure.com/)
-
-### Build from Source
+**1. Install.** You need Rust 1.88 or newer ([rustup.rs](https://rustup.rs)).
 
 ```bash
-git clone https://github.com/rc-basilisk/zesty-backup.git
-cd zesty-backup
+git clone https://github.com/rc-basilisk/zesty_backup.git
+cd zesty_backup
 cargo build --release
+sudo cp target/release/zesty-backup /usr/local/bin/
 ```
 
-The binary will be at `target/release/zesty-backup`.
-
-### Install System-Wide (Optional)
+**2. Create a config file.**
 
 ```bash
-sudo cp target/release/zesty-backup /usr/local/bin/zesty-backup
+zesty-backup generate-config --output config.toml
+chmod 600 config.toml        # it will contain credentials
 ```
 
-## Quick Start
+Then edit `config.toml`. At minimum, set:
 
-### 1. Generate Example Configuration
+- `[storage]`: your provider and its credentials (see [Storage providers](#storage-providers))
+- `[backup] project_path`: the folder to back up
+- `[backup] local_backup_dir`: where archives are written
+
+**3. Run a backup and upload it.**
 
 ```bash
-zesty-backup generate-config
+zesty-backup backup          # creates ./backups/backup-incr-<date>.tar.zst
+zesty-backup upload          # uploads every backup that isn't in the cloud yet
+zesty-backup list --remote   # check it arrived
 ```
 
-This creates `config.toml.example` with all available options.
+**4. Automate it** with the [daemon or a systemd timer](#running-on-a-schedule).
 
-### 2. Configure Your Backup
+## Commands
 
-Copy the example config and edit it:
+All commands read `config.toml` from the current directory. Use
+`--config /path/to/config.toml`, or set `ZESTY_BACKUP_CONFIG`, to point
+elsewhere.
 
-```bash
-cp config.toml.example config.toml
-nano config.toml
-```
+| Command | What it does |
+| --- | --- |
+| `backup` | Create a new archive in `local_backup_dir`. `--full` only changes the name to `backup-full-…`. |
+| `upload` | Upload local backups that aren't in cloud storage yet. `--file <path>` uploads one file. |
+| `list` | List local backups. `--remote` lists backups in cloud storage. |
+| `download <name>` | Download a backup (`--output <dir>`, default `./restored`). |
+| `restore <file>` | Extract an archive (`--target <dir>`, default `./restored`). |
+| `verify <file>` | Check that an archive is complete and not corrupted. |
+| `clean` | Delete backups older than `retention_days`, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
+| `daemon` | Keep running: back up, upload and clean on a schedule. |
+| `client …` | Use remote backups without a config file (e.g. from your laptop). |
+| `status` | Show the configuration and local/remote backup counts. |
+| `logs` | Show the last lines of the log file (`-l 100` for more). |
+| `generate-config` | Write the commented example config. |
 
-**Minimum required configuration:**
-- Set your storage provider
-- Configure provider credentials
-- Set `project_path` to the directory you want to backup
-- Set `local_backup_dir` for local backup storage
+`zesty-backup <command> --help` shows every option.
 
-### 3. Create Your First Backup
-
-```bash
-zesty-backup backup
-```
-
-### 4. Upload to Cloud Storage
-
-```bash
-zesty-backup upload
-```
-
-## Usage
-
-### Basic Commands
-
-```bash
-# Create an incremental backup
-zesty-backup backup
-
-# Create a full backup
-zesty-backup backup --full
-
-# List local backups
-zesty-backup list
-
-# List remote backups
-zesty-backup list --remote
-
-# Upload backups to cloud storage
-zesty-backup upload
-
-# Upload a specific backup file
-zesty-backup upload --file ./backups/backup-20240101-120000.tar.zst
-
-# Download a backup from cloud storage
-zesty-backup download backup-20240101-120000.tar.zst --output ./restored
-
-# Clean old backups (dry run)
-zesty-backup clean --dry-run
-
-# Clean old backups (actually delete)
-zesty-backup clean
-
-# Restore from a backup file
-zesty-backup restore ./backups/backup-20240101-120000.tar.zst --target /path/to/restore
-
-# Show backup system status
-zesty-backup status
-
-# Show recent logs
-zesty-backup logs
-
-# Generate example configuration
-zesty-backup generate-config
-```
-
-### Daemon Mode
-
-Run as a background service with automatic scheduled backups:
-
-```bash
-zesty-backup daemon \
-  --backup-interval 6 \
-  --upload-interval 24 \
-  --pid-file /var/run/zesty-backup.pid
-```
-
-### Client Mode (Desktop Access)
-
-Access your backups from any machine without a full config file:
-
-```bash
-# List remote backups
-zesty-backup client \
-  --provider s3 \
-  --endpoint https://s3.amazonaws.com \
-  --region us-east-1 \
-  --bucket my-backups \
-  --access-key YOUR_KEY \
-  --secret-key YOUR_SECRET \
-  list
-
-# Download a backup
-zesty-backup client \
-  --provider s3 \
-  --endpoint https://s3.amazonaws.com \
-  --region us-east-1 \
-  --bucket my-backups \
-  --access-key YOUR_KEY \
-  --secret-key YOUR_SECRET \
-  download backup-20240101-120000.tar.zst \
-  --output ./restored
-```
-
-Or use a config file:
-
-```bash
-zesty-backup client --config config.toml list
-```
+> **About "incremental":** every archive is a complete snapshot. The
+> `backup-incr-` and `backup-full-` prefixes only help you tell scheduled and
+> manual backups apart.
 
 ## Configuration
 
-### Obtaining OAuth2 Tokens for Consumer-Grade Providers
+[`config.example.toml`](config.example.toml) is the full reference; every option
+is commented there. Only `[storage]` and `[backup]` are required. Unknown keys
+are rejected, so a typo is reported as an error instead of being silently ignored.
 
-Consumer-grade providers (Google Drive, OneDrive, Dropbox, Box) require OAuth2 access tokens:
+```toml
+[storage]
+provider = "s3"
+region = "eu-west-3"
+bucket = "my-backups"
+access_key = "AKIA..."
+secret_key = "..."
 
-- **Google Drive**: Create a project in [Google Cloud Console](https://console.cloud.google.com/), enable Drive API, create OAuth2 credentials, and use the access token
-- **OneDrive**: Register an app in [Azure Portal](https://portal.azure.com/), get OAuth2 token via Microsoft Graph API
-- **Dropbox**: Create an app in [Dropbox App Console](https://www.dropbox.com/developers/apps), generate access token
-- **Box**: Create an app in [Box Developer Console](https://developer.box.com/), get OAuth2 token
-- **pCloud**: Go to [pCloud API Keys](https://my.pcloud.com/#page=apikeys), create an API key, and use it as the access token
+[backup]
+project_path = "/var/www/myapp"
+local_backup_dir = "/var/backups/myapp"
+additional_paths = ["/etc/nginx/sites-available/myapp"]
+exclude = ["node_modules", ".git", "*.log", "storage/cache/*"]
+retention_days = 14
+compression_level = 3
+```
 
-> **Note**: Access tokens expire. For production use, implement token refresh or use long-lived tokens where available.
+### What can be included
 
-### Storage Configuration Examples
+| Config | Stored in the archive as |
+| --- | --- |
+| `[backup] project_path` | `project/<folder name>/…` |
+| `[backup] additional_paths` | `system/<name>` |
+| `[database]` (postgres, mysql/mariadb, mongodb, redis, sqlite, cassandra/scylla schema) | `database/…` |
+| `[system] systemd_services` / `systemd_timers` | `systemd/services/…`, `systemd/timers/…` |
+| `[system] command_outputs` (output of any command) | `commands/<output_file>` |
+| `[system.presets]` nginx, crontab | `system/nginx/…`, `system/crontab-<user>.txt` |
+| `[system.presets]` user_configs, etc_files, etc_dirs | `user-configs/…`, `etc/…` |
 
-#### AWS S3
+### Exclude patterns
+
+- **A name or glob without `/`** matches a file or folder at any depth.
+  `node_modules` skips every `node_modules` folder; `*.log` skips every `.log` file.
+- **A pattern with `/`** matches a path relative to the folder being backed up
+  (`storage/cache/*`), or an absolute path (`/var/www/myapp/tmp`).
+- `local_backup_dir` is always excluded, even when it sits inside `project_path`.
+
+### Databases
+
+The matching dump tool must be installed: `pg_dump`, `mysqldump`/`mariadb-dump`,
+`mongodump`, `redis-cli`, `cqlsh`, or `sqlite3` (optional for SQLite). The
+password is read from, in order:
+
+1. `password` in `[database]`
+2. the `DB_PASSWORD` environment variable
+3. `DATABASE_URL` in `<project_path>/.env`
+
+Without a password, PostgreSQL falls back to `~/.pgpass`. Passwords are passed
+to the tools through environment variables, never on the command line.
+Cassandra/Scylla is the exception: `cqlsh` has no other way to take a password.
+
+## Storage providers
+
+| Provider | `provider =` | Status |
+| --- | --- | --- |
+| AWS S3 | `aws` or `s3` | ✅ tested against an S3 emulator |
+| MinIO, Contabo, DigitalOcean Spaces, Wasabi, Cloudflare R2, other S3-compatible | `minio`, `contabo`, `digitalocean`, `wasabi`, `r2`, `s3` | ✅ same code as AWS |
+| Google Cloud Storage | `gcs` | ⚠️ not tested live |
+| Azure Blob Storage | `azure` | ⚠️ not tested live |
+| Backblaze B2 | `b2` | ⚠️ not tested live (or use B2's S3 endpoint with `provider = "s3"`) |
+| Google Drive | `googledrive` | ⚠️ not tested live |
+| OneDrive | `onedrive` | ⚠️ not tested live |
+| Dropbox | `dropbox` | ⚠️ not tested live |
+| Box | `box` | ⚠️ not tested live |
+| pCloud | `pcloud` | ⚠️ not tested live |
+| MEGA | `mega` | ⚠️ not tested live, needs [MEGAcmd](https://mega.nz/cmd) |
+
+"Not tested live" means the code follows each provider's official API
+documentation but hasn't been run against a real account. If you try one,
+please report back in an issue, whether it works or not.
+
+Uploads stream from disk, and large files are sent in parts (multipart, chunked
+or upload sessions, depending on the provider), so archive size isn't limited by
+RAM or by single-request limits.
+
+Object stores (S3, GCS, Azure, B2) save archives under the `backups/` prefix.
+Consumer drives (Google Drive, OneDrive, Dropbox, Box, pCloud, MEGA) save them
+directly in the folder set by `bucket_id`.
+
+<details>
+<summary><b>AWS S3</b></summary>
 
 ```toml
 [storage]
 provider = "aws"
-region = "us-east-1"
+region = "eu-west-3"
 bucket = "my-backups"
-access_key = "AKIAIOSFODNN7EXAMPLE"
-secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-# endpoint can be omitted for AWS
+access_key = "AKIA..."
+secret_key = "..."
 ```
 
-#### Google Cloud Storage
+Leave out `access_key` and `secret_key` to use the standard AWS credential chain
+instead: `AWS_*` environment variables, `~/.aws/credentials`, or the instance's
+IAM role. The key only needs `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`
+and `s3:DeleteObject` on the bucket.
+</details>
 
-Requires service account credentials. Get them from [Google Cloud Console](https://console.cloud.google.com/).
-
-```toml
-[storage]
-provider = "gcs"  # or "google"
-bucket = "my-backups"
-credentials_path = "/path/to/service-account-key.json"  # Optional: uses GOOGLE_APPLICATION_CREDENTIALS env var if not set
-```
-
-> **Note**: You can either:
-> - Set `credentials_path` in the config file, or
-> - Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to point to your service account JSON key file, or
-> - Use default credentials from `gcloud` if you're running on a GCP instance
-
-#### Azure Blob Storage
-
-Requires storage account name and access key. Get them from [Azure Portal](https://portal.azure.com/).
+<details>
+<summary><b>S3-compatible: MinIO, Contabo, DigitalOcean, Wasabi, Cloudflare R2, Backblaze (S3 API)</b></summary>
 
 ```toml
-[storage]
-provider = "azure"
-account_name = "mystorageaccount"
-account_key = "your-account-key"  # Optional: can also use AZURE_STORAGE_ACCOUNT_KEY env var
-bucket = "my-container"  # Azure uses "container" instead of "bucket"
-```
+# MinIO (and any other S3-compatible server)
+provider = "minio"
+endpoint = "http://localhost:9000"
+bucket = "backups"
+access_key = "..."
+secret_key = "..."
 
-> **Note**: You can either:
-> - Set `account_key` in the config file, or
-> - Set the `AZURE_STORAGE_ACCOUNT_KEY` environment variable
-> 
-> Azure Blob Storage uses "containers" instead of "buckets", but the config uses `bucket` for consistency with other providers.
-
-#### Backblaze B2
-
-```toml
-[storage]
-provider = "b2"
-account_id = "your-account-id"
-application_key = "your-application-key"
-bucket_id = "your-bucket-id"
-bucket = "my-backups"
-```
-
-#### Google Drive
-
-Requires OAuth2 access token. Get one from [Google Cloud Console](https://console.cloud.google.com/).
-
-```toml
-[storage]
-provider = "googledrive"  # or "gdrive"
-access_key = "ya29.a0AfH6SMC..."  # OAuth2 access token
-bucket_id = "folder-id-here"  # Optional: Google Drive folder ID (defaults to root)
-```
-
-#### OneDrive
-
-Requires OAuth2 access token. Get one from [Azure Portal](https://portal.azure.com/).
-
-```toml
-[storage]
-provider = "onedrive"
-access_key = "eyJ0eXAiOiJKV1QiLCJub..."  # OAuth2 access token
-bucket_id = "/drive/root:/Backups"  # Optional: folder path (defaults to root)
-```
-
-#### Dropbox
-
-Requires access token. Get one from [Dropbox App Console](https://www.dropbox.com/developers/apps).
-
-```toml
-[storage]
-provider = "dropbox"
-access_key = "sl.Bk..."  # Dropbox access token
-bucket_id = "/Backups"  # Optional: folder path (defaults to root)
-```
-
-#### Box
-
-Requires OAuth2 access token. Get one from [Box Developer Console](https://developer.box.com/).
-
-```toml
-[storage]
-provider = "box"
-access_key = "T9cE5asOhuy8CC6..."  # OAuth2 access token
-bucket_id = "123456789"  # Optional: folder ID (defaults to root folder "0")
-```
-
-#### pCloud
-
-Requires API access token. Get one from [pCloud API Keys](https://my.pcloud.com/#page=apikeys).
-
-```toml
-[storage]
-provider = "pcloud"
-access_key = "your-api-access-token"  # Get from https://my.pcloud.com/#page=apikeys
-region = "us"  # "us" for US data center (default) or "eu" for European data center
-bucket_id = "/Backups"  # Optional: folder path (defaults to root "/")
-```
-
-> **Note**: pCloud has two data centers (US and EU). Set `region = "eu"` if your account is in the European data center. The provider automatically uses the correct API endpoint.
-
-#### MEGA
-
-Uses MEGAcmd (official MEGA command-line tool) which handles client-side encryption automatically.
-
-**Prerequisites**: Install MEGAcmd from [https://mega.nz/cmd](https://mega.nz/cmd)
-
-```toml
-[storage]
-provider = "mega"
-account_name = "your-email@example.com"  # MEGA email
-account_key = "your-password"  # MEGA password
-bucket_id = "/Backups"  # Optional: folder path (defaults to root "/")
-```
-
-> **Note**: MEGA uses client-side encryption, which MEGAcmd handles automatically. The provider will automatically log in using your credentials and manage the encryption/decryption process.
-
-#### DigitalOcean Spaces
-
-```toml
-[storage]
-provider = "digitalocean"
-endpoint = "https://nyc3.digitaloceanspaces.com"
-region = "nyc3"
-bucket = "my-backups"
-access_key = "your-spaces-key"
-secret_key = "your-spaces-secret"
-```
-
-#### Contabo Object Storage
-
-```toml
-[storage]
+# Contabo
 provider = "contabo"
 endpoint = "https://eu2.contabostorage.com"
-region = "eu2"
+
+# DigitalOcean Spaces: endpoint derived from region
+provider = "digitalocean"
+region = "nyc3"
+
+# Wasabi: endpoint derived from region
+provider = "wasabi"
+region = "eu-central-1"
+
+# Cloudflare R2: endpoint derived from your account ID
+provider = "r2"
+account_id = "your-cloudflare-account-id"
+
+# Backblaze B2 through its S3 API
+provider = "s3"
+endpoint = "https://s3.us-west-004.backblazeb2.com"
+region = "us-west-004"
+```
+
+Each of these also needs `bucket`, `access_key` and `secret_key`. An explicit
+`endpoint` always overrides the derived one. Path-style URLs are on by default
+for MinIO and Contabo; set `force_path_style = true` or `false` to override.
+</details>
+
+<details>
+<summary><b>Google Cloud Storage</b></summary>
+
+```toml
+provider = "gcs"
 bucket = "my-backups"
-access_key = "your-access-key"
-secret_key = "your-secret-key"
+credentials_path = "/etc/zesty-backup/gcs-key.json"
 ```
 
-### Backup Configuration
+Create a service account with the *Storage Object Admin* role on the bucket,
+then download a JSON key for it. Instead of `credentials_path` you can:
+
+- set `GOOGLE_APPLICATION_CREDENTIALS`,
+- run `gcloud auth application-default login`, or
+- run on a GCP VM that has a service account attached.
+</details>
+
+<details>
+<summary><b>Azure Blob Storage</b></summary>
 
 ```toml
-[backup]
-# Local directory for storing backups
-local_backup_dir = "./backups"
-
-# Main directory to backup
-project_path = "/var/www/myapp"
-
-# Additional files/directories to include
-additional_paths = [
-    "/etc/nginx/nginx.conf",
-    "/etc/nginx/sites-available/myapp",
-]
-
-# Number of incremental backups per day
-incremental_per_day = 4
-
-# Upload interval in hours
-upload_interval_hours = 24
-
-# Retention period in days
-retention_days = 7
-
-# Compression level (0-22)
-# 0 = no compression, 3 = balanced, 22 = maximum
-compression_level = 3
-
-# Paths to exclude (supports patterns)
-exclude = [
-    "node_modules",
-    ".git",
-    "*.log",
-]
+provider = "azure"
+account_name = "mystorageaccount"
+account_key = "..."        # Storage account → Access keys
+bucket = "backups"         # the container name
 ```
 
-### Database Backup (Optional)
+Instead of `account_key`, you can use any `AZURE_STORAGE_*` environment variable
+that the `object_store` crate supports, for example `AZURE_STORAGE_SAS_TOKEN`,
+or a service principal (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
+`AZURE_TENANT_ID`).
+</details>
 
-Supports multiple database types: `postgres`, `mariadb`, `mysql`, `mongodb`, `cassandra`, `scylla`, `redis`, `sqlite`
+<details>
+<summary><b>Backblaze B2 (native API)</b></summary>
 
 ```toml
-[database]
-enabled = true
-type = "postgres"  # postgres, mariadb, mysql, mongodb, cassandra, scylla, redis, sqlite
-host = "localhost"
-port = 5432
-database = "myapp_db"
-username = "myuser"
-password = "your_password"  # Optional: can also use DB_PASSWORD env var or .env file
+provider = "b2"
+account_id = "0051234abcd..."     # the keyID of an application key
+application_key = "K005..."
+bucket = "my-backups"             # bucket name
+# bucket_id = "..."               # optional, looked up from the name
 ```
 
-### System Configuration
+Create the key under *Application Keys* in the Backblaze web UI. Prefer a key
+restricted to the backup bucket.
+</details>
 
-#### Systemd Services and Timers
+<details>
+<summary><b>Google Drive, OneDrive, Dropbox, Box (OAuth)</b></summary>
+
+These services use OAuth access tokens, which expire after one to four hours.
+For anything unattended (the daemon, cron), give Zesty a **refresh token**, and
+it will fetch fresh access tokens by itself:
 
 ```toml
-[system]
-systemd_services = [
-    "myapp.service",
-    "myapp-worker.service",
-]
-
-systemd_timers = [
-    "myapp-cleanup.timer",
-]
+provider = "dropbox"              # or "googledrive", "onedrive", "box"
+refresh_token = "..."
+client_id = "..."
+client_secret = "..."             # not needed for public/PKCE apps
+bucket_id = "/Backups"            # the folder (see the table below)
+# token_cache = "/var/lib/zesty-backup/token"   # required for Box, see below
 ```
 
-#### Command Outputs (General Pattern)
+For a one-off command you can set `access_key = "<access token>"` instead.
 
-Backup the output of any command as a text file. This is a general pattern that works for any command:
+| | Folder (`bucket_id`) | Where to create the app | Authorize URL (open in a browser) | Token URL |
+| --- | --- | --- | --- | --- |
+| **Google Drive** | folder **ID** (from the folder's URL); default: My Drive root | [Google Cloud Console](https://console.cloud.google.com/apis/credentials): enable the Drive API, create an OAuth client of type *Desktop app* | `https://accounts.google.com/o/oauth2/v2/auth?client_id=ID&redirect_uri=http://localhost&response_type=code&access_type=offline&prompt=consent&scope=https://www.googleapis.com/auth/drive` | `https://oauth2.googleapis.com/token` |
+| **OneDrive** | folder **path**, e.g. `/Backups` | [Azure portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps): allow personal accounts, add redirect URI `http://localhost` (*Mobile and desktop*) | `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=ID&redirect_uri=http://localhost&response_type=code&scope=offline_access%20Files.ReadWrite` | `https://login.microsoftonline.com/common/oauth2/v2.0/token` |
+| **Dropbox** | folder **path**, e.g. `/Backups` | [App Console](https://www.dropbox.com/developers/apps): enable `files.content.write` and `files.content.read` | `https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline` (no redirect: the code is shown on screen) | `https://api.dropboxapi.com/oauth2/token` |
+| **Box** | folder **ID**; default: `0` (root) | [Developer Console](https://app.box.com/developers/console): Custom App → *User Authentication (OAuth 2.0)*, redirect URI `http://localhost` | `https://account.box.com/api/oauth2/authorize?client_id=ID&redirect_uri=http://localhost&response_type=code` | `https://api.box.com/oauth2/token` |
+
+After you approve access, the browser is sent to `http://localhost/?code=…`.
+The page won't load; that's expected. Copy the `code` value from the address
+bar, then quickly exchange it (Box codes expire after 30 seconds):
+
+```bash
+curl -s -X POST <token URL> \
+  -d grant_type=authorization_code -d code=<CODE> \
+  -d client_id=<ID> -d client_secret=<SECRET> \
+  -d redirect_uri=http://localhost     # leave this line out for Dropbox
+```
+
+Put the `refresh_token` from the response into your config.
+
+**Watch out for:**
+
+- **Google:** while your OAuth app is in *Testing* mode, refresh tokens stop
+  working after 7 days. Publish the app (it can stay unverified for personal
+  use) to avoid this.
+- **Box:** every refresh token can only be used once. Set `token_cache` to a
+  writable file. Zesty saves each new refresh token there and reads it on the
+  next start.
+- **OneDrive:** for work or school accounts, set `tenant_id` to your tenant
+  (default: `common`).
+</details>
+
+<details>
+<summary><b>pCloud</b></summary>
 
 ```toml
-[system]
-command_outputs = [
-    { command = "docker", args = ["ps", "-a"], output_file = "docker_containers.txt", enabled = true },
-    { command = "systemctl", args = ["list-units", "--type=service"], output_file = "systemd_services.txt", enabled = true },
-    { command = "dpkg", args = ["-l"], output_file = "installed_packages.txt", enabled = true },
-]
+provider = "pcloud"
+access_key = "..."       # OAuth access token (pCloud tokens don't expire)
+region = "eu"            # "us" (default) or "eu": where your account lives
+bucket_id = "/Backups"   # folder path, created if missing
 ```
 
-#### Presets for Common Scenarios
+To get a token:
 
-Quick configuration presets for common backup needs:
+1. Register an app with pCloud.
+2. Open `https://my.pcloud.com/oauth2/authorize?client_id=<ID>&response_type=token&redirect_uri=<your redirect URI>`.
+3. Copy `access_token` from the URL you are redirected to.
+
+That URL also contains `hostname`. If it's `eapi.pcloud.com`, set `region = "eu"`.
+</details>
+
+<details>
+<summary><b>MEGA</b></summary>
+
+Install [MEGAcmd](https://mega.nz/cmd), then log in once as the user who will run
+the backups:
+
+```bash
+mega-login you@example.com
+```
 
 ```toml
-[system.presets]
-# Nginx configuration
-nginx_enabled = true  # Backs up /etc/nginx/nginx.conf and sites-available/enabled
-nginx_sites = [
-    "example.com",
-    "another-site.com",
-]
-
-# Crontab
-crontab_enabled = true
-crontab_user = null  # null = current user, or specify like "www-data"
-
-# User config files (from home directory)
-user_configs = [
-    ".zshrc",
-    ".bashrc",
-    ".vimrc",
-    ".gitconfig",
-]
-user_configs_home = null  # null = $HOME, or specify path
-
-# Common /etc files and directories
-etc_files = [
-    "hosts",
-    "fstab",
-]
-etc_dirs = [
-    "ssl",
-    "letsencrypt",
-]
+provider = "mega"
+bucket_id = "/Backups"   # folder, created if missing
 ```
 
-## Systemd Service Setup
+You can also set `account_name` (email) and `account_key` (password), and Zesty
+will log in when needed. Avoid this on shared machines: MEGAcmd takes the
+password as a command-line argument, which other local users can see.
+</details>
 
-Create a systemd service file at `/etc/systemd/system/zesty-backup.service`:
+## Running on a schedule
+
+### Option A: the built-in daemon
+
+```bash
+zesty-backup daemon
+```
+
+The daemon creates a backup right away, uploads it, and cleans old backups.
+After that it repeats on a schedule:
+
+- **Backups:** every `24 / incremental_per_day` hours (default: 6)
+- **Upload and clean:** every `upload_interval_hours` (default: 24)
+
+Override them with `--backup-interval <hours>` and `--upload-interval <hours>`.
+If an upload fails, the clean step is skipped, so no local copy is deleted
+before it has been uploaded. The daemon stops cleanly on Ctrl-C or SIGTERM.
+
+Example systemd unit, `/etc/systemd/system/zesty-backup.service`:
 
 ```ini
 [Unit]
-Description=Zesty Backup Service
-After=network.target
+Description=Zesty Backup
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
-User=your-user
+User=backup
 WorkingDirectory=/opt/zesty-backup
-ExecStart=/usr/local/bin/zesty-backup daemon \
-  --backup-interval 6 \
-  --upload-interval 24 \
-  --pid-file /var/run/zesty-backup.pid \
-  --config /opt/zesty-backup/config.toml
-Restart=always
-RestartSec=10
+ExecStart=/usr/local/bin/zesty-backup --config /opt/zesty-backup/config.toml daemon
+Restart=on-failure
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
-
 ```bash
-sudo systemctl enable zesty-backup
-sudo systemctl start zesty-backup
+sudo systemctl enable --now zesty-backup
+journalctl -u zesty-backup -f      # follow the logs
 ```
 
-## What Gets Backed Up
+### Option B: cron (or a systemd timer)
 
-- **Project Directory**: Everything in `project_path` (respects `exclude` patterns)
-- **Additional Paths**: Files and directories listed in `additional_paths`
-- **Systemd Services/Timers**: If configured in `[system.systemd_services]` and `[system.systemd_timers]`
-- **Database**: If enabled in `[database]` (supports postgres, mariadb, mysql, mongodb, cassandra, scylla, redis, sqlite)
-- **Command Outputs**: Text dumps of any command output (configured in `[system.command_outputs]`)
-- **Nginx Configs**: If `nginx_enabled = true` in presets
-- **Crontab**: If `crontab_enabled = true` in presets
-- **User Config Files**: Files from home directory (configured in `[system.presets.user_configs]`)
-- **System Files**: Files and directories from `/etc/` (configured in presets)
+Nothing runs between backups:
 
-## Compression
+```cron
+# every 6 hours: back up, upload what's new, delete what's too old
+0 */6 * * *  cd /opt/zesty-backup && zesty-backup backup && zesty-backup upload && zesty-backup clean
+```
 
-Zesty Backup uses zstd compression with configurable levels:
+## Restoring a backup
 
-- **Level 0**: No compression (fastest)
-- **Level 3**: Balanced (recommended default)
-- **Level 22**: Maximum compression (slowest, best space savings)
+```bash
+zesty-backup list --remote
+zesty-backup download backup-incr-20250101-120000.tar.zst --output ./restored
+zesty-backup verify  ./restored/backup-incr-20250101-120000.tar.zst
+zesty-backup restore ./restored/backup-incr-20250101-120000.tar.zst --target ./restored/files
+```
 
-Choose based on your priorities: speed vs. storage space.
+`restore` keeps file permissions, timestamps and symlinks. It refuses archive
+entries that would land outside the target folder.
+
+On a machine with no config file, use `client`. It takes the credentials as
+flags, and secrets can also come from environment variables:
+
+```bash
+export ZESTY_ACCESS_KEY=... ZESTY_SECRET_KEY=...
+zesty-backup client --provider aws --region eu-west-3 --bucket my-backups list
+zesty-backup client --provider aws --region eu-west-3 --bucket my-backups \
+  download backup-incr-20250101-120000.tar.zst --output ./restored
+```
+
+Archives are standard `tar` + `zstd`, so you can also use system tools:
+`tar --zstd -xf backup.tar.zst`, or `zstd -dc backup.tar.zst | tar -x`.
+
+## Docker
+
+```bash
+docker build -t zesty-backup .
+mkdir -p config backups logs && cp config.example.toml config/config.toml   # then edit it
+docker compose up -d     # runs the daemon, see docker-compose.yml
+```
+
+Inside the container, the config is read from `/app/config/config.toml`
+(`ZESTY_BACKUP_CONFIG`). Mount the folders you want backed up read-only, and
+point `project_path` at them. The image doesn't include database dump tools.
+To back up a database from Docker, extend the image or use `command_outputs`.
 
 ## Security
 
-- **Credentials**: Never commit `config.toml` with real credentials to version control
-- **Environment Variables**: Use `DB_PASSWORD` environment variable for database passwords
-- **File Permissions**: Ensure `config.toml` has restrictive permissions: `chmod 600 config.toml`
-- **IAM Roles**: For cloud providers, prefer IAM roles over access keys when possible
+- Archives are **not encrypted** by Zesty. They're written with `0600`
+  permissions locally. For remote copies, use your provider's server-side
+  encryption, or pick a provider that encrypts client-side (MEGA).
+- Keep `config.toml` private (`chmod 600`). Prefer IAM roles, service
+  accounts, or environment variables over keys in the file where possible.
+- Use credentials limited to the backup bucket or folder.
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Troubleshooting
 
-### Backup Fails
+| Symptom | Things to check |
+| --- | --- |
+| `Failed to parse config file … unknown field` | Typo in a key name. Compare with `config.example.toml`. |
+| Backup fails on a database | Is the dump tool installed and in `PATH`? Is the password set? Run the tool by hand with the same settings. |
+| `… file(s) could not be read and were skipped` | Permission problems. Run as a user that can read those files, or exclude them. |
+| S3-compatible upload fails with a signature or checksum error | Set the right `region`. Try `force_path_style = true`. |
+| B2/Azure/GCS "not found" | Check the bucket/container name, and that the key has access to it. |
+| OAuth provider: 401 / `invalid_grant` | The access token expired, or the refresh token was revoked or used twice (Box). Get a new refresh token. |
+| pCloud: `Log in failed` / code 2000 | Wrong token, or wrong `region` (EU accounts need `region = "eu"`). |
+| `zesty-backup logs` says no log file | Set `log_dir` in `[logging]`. Under systemd, use `journalctl -u zesty-backup`. |
 
-- Check that `project_path` exists and is readable
-- Verify storage provider credentials are correct
-- Check disk space in `local_backup_dir`
-- Review logs: `zesty-backup logs`
-
-### Upload Fails
-
-- Verify network connectivity
-- Check storage provider credentials and permissions
-- Ensure bucket/container exists and is accessible
-- Check provider-specific requirements (e.g., B2 requires bucket_id)
-
-### Database Backup Fails
-
-- Ensure the appropriate dump tool is installed (`pg_dump`, `mysqldump`, `mongodump`, etc.) and in PATH
-- Verify database password is set (in config, `DB_PASSWORD` env var, or `.env` file)
-- Check database connection settings (host, port, username)
-- Ensure database user has backup permissions
-- For SQLite: ensure the database file path is correct and accessible
-
-## Contributing
-
-Contributions welcome! Open an issue or submit a PR. Keep it simple - format code with `cargo fmt`, run `cargo clippy`, and test your changes.
-
-## License
-
-MIT License - do what you want with it.
-
-## Docker Support
-
-### Using Docker
-
-```bash
-# Build the image
-docker build -t zesty-backup .
-
-# Run a backup
-docker run --rm -v $(pwd)/config:/app/config:ro -v $(pwd)/backups:/app/backups zesty-backup backup
-
-# Run as daemon
-docker-compose up -d
-```
-
-See `Dockerfile` and `docker-compose.yml` for more details.
+Use `RUST_LOG=zesty_backup=debug zesty-backup …` for more detail.
 
 ## Development
 
-### Running Tests
-
 ```bash
-# Run all tests
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
 cargo test
-
-# Run specific test suite
-cargo test --test integration_test
-cargo test --test provider_test
-cargo test --test backup_test
 ```
 
-### Examples
+Code layout:
 
-See the `examples/` directory for usage examples.
+- `src/main.rs`: the CLI
+- `src/backup.rs`: create, upload, list, download and clean
+- `src/archive.rs`: tar.zst writing, extraction and exclude patterns
+- `src/database.rs`: database dumps
+- `src/providers/`: one file per storage backend
 
-## Acknowledgments
+The tests in `tests/` run the whole workflow against a local folder that stands
+in for cloud storage. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
-- Built with [Rust](https://www.rust-lang.org/)
-- Uses [object_store](https://crates.io/crates/object_store) for unified cloud storage access
-- Inspired by the need for flexible, multi-provider backup solutions
+Contributions are welcome. Please open an issue or a PR.
 
-## Support
+## License
 
-- **Issues**: [GitHub Issues](https://github.com/rc-basilisk/zesty-backup/issues)
-- **Documentation**: See this README and inline code documentation
+[MIT](LICENSE)

@@ -6,8 +6,8 @@ We actively support the following versions with security updates:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| latest  | :white_check_mark: |
+| 1.0.x   | :x: (archives are not restorable, please upgrade) |
 
 ## Reporting a Vulnerability
 
@@ -77,24 +77,23 @@ When using zesty-backup:
 ## Known Security Considerations
 
 ### Credential Storage
-- Credentials are stored in plaintext in `config.toml`
+- Credentials are stored in plaintext in `config.toml` (and refreshed OAuth tokens in `token_cache`, written with `0600`)
+- Database passwords are passed to dump tools via environment variables, not command-line arguments (except `cqlsh`, which has no alternative)
 - Consider using environment variables or secret management systems
 - File permissions should be restricted (600)
 
 ### Network Communication
-- All cloud provider APIs use HTTPS/TLS
-- No data is transmitted over unencrypted connections
+- All cloud provider APIs use HTTPS/TLS (an `http://` endpoint, e.g. for a local MinIO, is your choice)
 - Provider-specific security features are respected
 
 ### Local Storage
-- Backup files are stored locally before upload
-- Ensure backup directories have appropriate permissions
-- Consider encrypting local backups for sensitive data
+- Backup files are stored locally before upload, created with `0600` permissions
+- Archives are not encrypted by zesty-backup: use provider-side encryption, or encrypt them yourself for sensitive data
 
 ### MEGA Provider
 - Uses MEGAcmd which handles client-side encryption
 - Requires MEGAcmd to be installed and configured
-- MEGA credentials are passed to MEGAcmd process
+- If `account_name`/`account_key` are configured, the password is passed to `mega-login` as an argument (visible to local users via `ps`); prefer logging in once with `mega-login` manually
 
 ## Security Audit
 

@@ -1,44 +1,29 @@
-//! Basic backup example script
+//! Create a backup and upload it, using zesty-backup as a library.
 //!
-//! This example demonstrates how to use zesty-backup via command-line.
-//! Since zesty-backup is a binary crate, this shows the equivalent commands.
-//!
-//! For programmatic usage, you would need to use zesty-backup as a library
-//! or call it as a subprocess.
+//! Usage: cargo run --example basic-backup -- path/to/config.toml
 
-fn main() {
-    println!("zesty-backup Usage Examples");
-    println!("==========================\n");
+use anyhow::Result;
+use zesty_backup::{backup, config::AppConfig, providers};
 
-    println!("1. Create a backup:");
-    println!("   zesty-backup backup\n");
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter("zesty_backup=info")
+        .init();
 
-    println!("2. Create a full backup:");
-    println!("   zesty-backup backup --full\n");
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.toml".into());
+    let config = AppConfig::load(&config_path)?;
 
-    println!("3. Upload backups to cloud:");
-    println!("   zesty-backup upload\n");
+    let archive = backup::create_backup(&config, false)?;
+    println!("Created {}", archive.display());
 
-    println!("4. Upload a specific backup:");
-    println!("   zesty-backup upload --file backups/backup-20240101-120000.tar.zst\n");
-
-    println!("5. List local backups:");
-    println!("   zesty-backup list\n");
-
-    println!("6. List remote backups:");
-    println!("   zesty-backup list --remote\n");
-
-    println!("7. Download a backup:");
-    println!("   zesty-backup download --key backup-20240101-120000.tar.zst --output ./restored.tar.zst\n");
-
-    println!("8. Run as daemon:");
-    println!("   zesty-backup daemon --backup-interval 6 --upload-interval 24 --pid-file /var/run/zesty-backup.pid\n");
-
-    println!("9. Client mode (download from remote):");
-    println!("   zesty-backup client --provider s3 --bucket my-bucket --access-key KEY --secret-key SECRET download --key backup.tar.zst --output ./backup.tar.zst\n");
-
-    println!("10. Generate example config:");
-    println!("    zesty-backup generate-config --output config.example.toml\n");
-
-    println!("For more information, see README.md and config.example.toml");
+    let provider = providers::from_config(&config.storage).await?;
+    backup::upload(provider.as_ref(), &config, Some(&archive)).await?;
+    println!("Uploaded. Remote backups:");
+    for item in backup::remote_backups(provider.as_ref()).await? {
+        println!("  {} ({})", item.key, backup::human_size(item.size));
+    }
+    Ok(())
 }
