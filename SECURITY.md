@@ -65,7 +65,7 @@ When using zesty-backup:
    - Regularly rotate access keys
 
 4. **Backup Security**:
-   - Encrypt sensitive backups before uploading
+   - Enable `[encryption]` with an age public key for sensitive backups
    - Use provider-side encryption when available
    - Store credentials securely (use secret management tools)
 
@@ -88,7 +88,7 @@ When using zesty-backup:
 
 ### Local Storage
 - Backup files are stored locally before upload, created with `0600` permissions
-- Archives are not encrypted by zesty-backup: use provider-side encryption, or encrypt them yourself for sensitive data
+- Archives are not encrypted unless `[encryption]` is configured (age). With public-key recipients, the server cannot decrypt its own backups; keep the private key off the server
 
 ### MEGA Provider
 - Uses MEGAcmd which handles client-side encryption

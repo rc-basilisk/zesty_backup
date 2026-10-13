@@ -3,6 +3,7 @@
 use crate::archive::{ArchiveWriter, Excluder};
 use crate::config::{AppConfig, CommandOutput, PresetsConfig};
 use crate::database;
+use crate::encryption::Encryption;
 use crate::providers::{BackupItem, StorageProvider};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
@@ -16,13 +17,17 @@ use tracing::{info, warn};
 pub const REMOTE_PREFIX: &str = "backups/";
 const TIMESTAMP_FORMAT: &str = "%Y%m%d-%H%M%S";
 
-/// `backup-full-YYYYMMDD-HHMMSS.tar.zst` or `backup-incr-…`.
+/// `backup-full-YYYYMMDD-HHMMSS.tar.zst` or `backup-incr-…`, optionally ending in `.age`
+/// when encrypted.
 pub fn is_backup_file_name(name: &str) -> bool {
-    name.starts_with("backup-") && name.ends_with(".tar.zst")
+    name.starts_with("backup-") && (name.ends_with(".tar.zst") || name.ends_with(".tar.zst.age"))
 }
 
 /// The creation time encoded in a backup file name (local time).
 pub fn timestamp_from_name(name: &str) -> Option<DateTime<Utc>> {
+    let name = name
+        .strip_suffix(crate::encryption::EXTENSION)
+        .unwrap_or(name);
     let stem = name.strip_suffix(".tar.zst")?;
     let ts = stem.get(stem.len().checked_sub(15)?..)?;
     let naive = NaiveDateTime::parse_from_str(ts, TIMESTAMP_FORMAT).ok()?;
@@ -57,16 +62,24 @@ pub fn create_backup(config: &AppConfig, full: bool) -> Result<PathBuf> {
     // A backup dir inside the project would otherwise end up inside every new backup.
     excluder.exclude_dir(Path::new(&backup.local_backup_dir));
 
+    // Checked before doing any work, so a bad key fails fast.
+    let encryption = Encryption::from_config(config.encryption.as_ref())?;
     let kind = if full { "full" } else { "incr" };
     let name = format!(
-        "backup-{}-{}.tar.zst",
+        "backup-{}-{}.tar.zst{}",
         kind,
-        Local::now().format(TIMESTAMP_FORMAT)
+        Local::now().format(TIMESTAMP_FORMAT),
+        if encryption.is_some() {
+            crate::encryption::EXTENSION
+        } else {
+            ""
+        }
     );
     let path = Path::new(&backup.local_backup_dir).join(&name);
     info!("Creating backup {}", path.display());
 
-    let mut archive = ArchiveWriter::create(&path, backup.compression_level())?;
+    let mut archive =
+        ArchiveWriter::create(&path, backup.compression_level(), encryption.as_ref())?;
 
     info!("Adding project: {}", backup.project_path);
     let project_name = base_name(project);
@@ -466,6 +479,10 @@ mod tests {
             "backup-full-20240101-120000.tar.zst.partial"
         ));
         assert!(!is_backup_file_name("notes.txt"));
+        assert!(is_backup_file_name(
+            "backup-full-20240101-120000.tar.zst.age"
+        ));
+        assert!(timestamp_from_name("backup-full-20240101-120000.tar.zst.age").is_some());
         let ts = timestamp_from_name("backup-incr-20240101-120000.tar.zst").unwrap();
         assert_eq!(
             ts.with_timezone(&Local)

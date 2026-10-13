@@ -1,8 +1,10 @@
 name: Release
 
+# Push a tag like v2.0.0 to build the binaries and publish a GitHub release.
 on:
-  release:
-    types: [created]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -79,6 +81,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: zesty-backup-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_format }}
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

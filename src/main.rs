@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 use zesty_backup::archive;
 use zesty_backup::backup::{self, human_size, REMOTE_PREFIX};
 use zesty_backup::config::{AppConfig, StorageConfig, EXAMPLE_CONFIG};
+use zesty_backup::encryption::DecryptionKeys;
 use zesty_backup::providers::{self, StorageProvider};
 
 #[derive(Parser)]
@@ -72,11 +73,17 @@ enum Commands {
         /// Target directory
         #[arg(short, long, default_value = "./restored")]
         target: PathBuf,
+        /// age private key file, for encrypted backups (passphrase: ZESTY_BACKUP_PASSPHRASE)
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
     },
     /// Check that a backup archive is complete and not corrupted
     Verify {
         /// Backup file path
         file: PathBuf,
+        /// age private key file, for encrypted backups (passphrase: ZESTY_BACKUP_PASSPHRASE)
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
     },
     /// Run in the foreground, creating, uploading and cleaning backups on a schedule
     Daemon {
@@ -178,18 +185,30 @@ async fn main() {
     }
 }
 
+/// Keys for reading encrypted archives: `--identity`, then the config's [encryption] section.
+fn decryption_keys(identity: Option<&Path>, config: Option<&AppConfig>) -> DecryptionKeys {
+    DecryptionKeys::new(identity, config.and_then(|c| c.encryption.as_ref()))
+}
+
 async fn run(cli: Cli, config: Result<AppConfig>) -> Result<()> {
     match cli.command {
         Commands::GenerateConfig { output, force } => generate_config(&output, force),
-        Commands::Restore { file, target } => {
+        Commands::Restore {
+            file,
+            target,
+            identity,
+        } => {
             info!("Restoring {} into {}", file.display(), target.display());
-            tokio::task::spawn_blocking(move || archive::extract(&file, &target)).await??;
+            let keys = decryption_keys(identity.as_deref(), config.as_ref().ok());
+            tokio::task::spawn_blocking(move || archive::extract(&file, &target, &keys)).await??;
             info!("Restore completed");
             Ok(())
         }
-        Commands::Verify { file } => {
+        Commands::Verify { file, identity } => {
             let path = file.clone();
-            let entries = tokio::task::spawn_blocking(move || archive::verify(&path)).await??;
+            let keys = decryption_keys(identity.as_deref(), config.as_ref().ok());
+            let entries =
+                tokio::task::spawn_blocking(move || archive::verify(&path, &keys)).await??;
             println!("OK: {} ({} entries)", file.display(), entries);
             Ok(())
         }

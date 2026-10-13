@@ -1,13 +1,14 @@
 [package]
 name = "zesty-backup"
-version = "1.0.2"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.88"
 description = "A flexible, multi-provider backup utility for cloud storage"
 license = "MIT"
 repository = "https://github.com/rc-basilisk/zesty_backup"
+homepage = "https://github.com/rc-basilisk/zesty_backup"
 authors = ["Basilisk <admin@zetsubou.life>"]
-keywords = ["backup", "cloud-storage", "s3", "blob-storage", "backup-utility"]
+keywords = ["backup", "cloud-storage", "s3", "encryption", "backup-utility"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 exclude = [
@@ -59,3 +60,4 @@ base64 = "0.22"
 sha1 = "0.10"
 # Google Cloud Storage and Azure Blob Storage
 object_store = { version = "0.12", features = ["gcp", "azure"] }
+age = { version = "0.12", features = ["armor"] }

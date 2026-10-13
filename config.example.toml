@@ -129,6 +129,21 @@ etc_dirs = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [encryption]: optional. Encrypts archives with age (https://age-encryption.org)
+# before they are written, so neither the disk nor the cloud sees plain data.
+# Encrypted archives end in .tar.zst.age.
+#
+# Recommended: a public key. Create a key pair on a machine you trust with
+#   age-keygen -o zesty-key.txt
+# put the printed public key (age1…) below, and keep zesty-key.txt somewhere
+# safe and OFF this server. Without it, the backups cannot be restored.
+# ─────────────────────────────────────────────────────────────────────────────
+# [encryption]
+# recipients = ["age1..."]        # one or more public keys
+# passphrase = "..."              # or instead a passphrase (better: the ZESTY_BACKUP_PASSPHRASE env var)
+# identity_file = "/path/key.txt" # private key, only needed where you run restore/verify
+
+# ─────────────────────────────────────────────────────────────────────────────
 # [logging]: optional
 # ─────────────────────────────────────────────────────────────────────────────
 [logging]

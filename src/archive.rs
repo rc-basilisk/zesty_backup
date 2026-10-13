@@ -1,5 +1,6 @@
 //! Writing and extracting `.tar.zst` backup archives.
 
+use crate::encryption::{open_archive, DecryptionKeys, Encryption};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use std::fs::{self, File};
@@ -89,14 +90,19 @@ impl Excluder {
 /// [`ArchiveWriter::finish`], so an interrupted backup never leaves a truncated file that
 /// looks like a valid backup.
 pub struct ArchiveWriter {
-    builder: Option<tar::Builder<zstd::Encoder<'static, BufWriter<File>>>>,
+    builder: Option<tar::Builder<zstd::Encoder<'static, Sink>>>,
     partial_path: PathBuf,
     final_path: PathBuf,
     skipped: usize,
 }
 
 impl ArchiveWriter {
-    pub fn create(path: &Path, compression_level: i32) -> Result<Self> {
+    /// `path` should end in `.tar.zst`, or `.tar.zst.age` when `encryption` is given.
+    pub fn create(
+        path: &Path,
+        compression_level: i32,
+        encryption: Option<&Encryption>,
+    ) -> Result<Self> {
         let partial_path = partial_path(path);
         // Backups contain secrets (database dumps, configs, keys): owner-only permissions.
         let mut options = fs::OpenOptions::new();
@@ -109,7 +115,12 @@ impl ArchiveWriter {
         let file = options
             .open(&partial_path)
             .with_context(|| format!("Failed to create {}", partial_path.display()))?;
-        let mut encoder = zstd::Encoder::new(BufWriter::new(file), compression_level)?;
+        let output = BufWriter::new(file);
+        let sink = match encryption {
+            Some(e) => Sink::Encrypted(e.wrap(output)?),
+            None => Sink::Plain(output),
+        };
+        let mut encoder = zstd::Encoder::new(sink, compression_level)?;
         // Lets `zstd -t` / `zstd -d` detect corruption.
         encoder.include_checksum(true)?;
         let mut builder = tar::Builder::new(encoder);
@@ -230,7 +241,11 @@ impl ArchiveWriter {
             .expect("archive already finished")
             .into_inner()
             .context("Failed to finish tar archive")?;
-        let mut writer = encoder.finish().context("Failed to finish zstd stream")?;
+        let sink = encoder.finish().context("Failed to finish zstd stream")?;
+        let mut writer = match sink {
+            Sink::Plain(w) => w,
+            Sink::Encrypted(w) => w.finish().context("Failed to finish encryption")?,
+        };
         writer.flush()?;
         let file = writer.into_inner().map_err(|e| e.into_error())?;
         file.sync_all()?;
@@ -240,8 +255,29 @@ impl ArchiveWriter {
         Ok(self.final_path.clone())
     }
 
-    fn builder(&mut self) -> &mut tar::Builder<zstd::Encoder<'static, BufWriter<File>>> {
+    fn builder(&mut self) -> &mut tar::Builder<zstd::Encoder<'static, Sink>> {
         self.builder.as_mut().expect("archive already finished")
+    }
+}
+
+/// Where the compressed stream goes: the file, or an age encryptor in front of it.
+enum Sink {
+    Plain(BufWriter<File>),
+    Encrypted(age::stream::StreamWriter<BufWriter<File>>),
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Plain(w) => w.write(buf),
+            Sink::Encrypted(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Plain(w) => w.flush(),
+            Sink::Encrypted(w) => w.flush(),
+        }
     }
 }
 
@@ -259,13 +295,11 @@ fn partial_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Extract a `.tar.zst` archive into `target`, keeping permissions and timestamps.
+/// Extract a `.tar.zst` (or encrypted `.tar.zst.age`) archive into `target`, keeping permissions and timestamps.
 /// Entries that would escape `target` (absolute paths, `..`) are refused by the tar crate.
-pub fn extract(archive: &Path, target: &Path) -> Result<()> {
+pub fn extract(archive: &Path, target: &Path, keys: &DecryptionKeys) -> Result<()> {
     fs::create_dir_all(target).with_context(|| format!("Failed to create {}", target.display()))?;
-    let file =
-        File::open(archive).with_context(|| format!("Failed to open {}", archive.display()))?;
-    let decoder = zstd::Decoder::new(file)?;
+    let decoder = zstd::Decoder::new(open_archive(archive, keys)?)?;
     let mut tar = tar::Archive::new(decoder);
     tar.set_preserve_permissions(true);
     tar.set_preserve_mtime(true);
@@ -276,10 +310,8 @@ pub fn extract(archive: &Path, target: &Path) -> Result<()> {
 
 /// Read the whole archive without writing anything, to check it is complete and uncorrupted.
 /// Returns the number of entries.
-pub fn verify(archive: &Path) -> Result<usize> {
-    let file =
-        File::open(archive).with_context(|| format!("Failed to open {}", archive.display()))?;
-    let decoder = zstd::Decoder::new(file)?;
+pub fn verify(archive: &Path, keys: &DecryptionKeys) -> Result<usize> {
+    let decoder = zstd::Decoder::new(open_archive(archive, keys)?)?;
     let mut tar = tar::Archive::new(decoder);
     let mut count = 0;
     for entry in tar.entries()? {

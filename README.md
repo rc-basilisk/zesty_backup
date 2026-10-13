@@ -24,6 +24,7 @@ It ships as one binary. You can run each step by hand or leave it running as a d
 - [Configuration](#configuration)
 - [Storage providers](#storage-providers)
 - [Running on a schedule](#running-on-a-schedule)
+- [Encryption](#encryption)
 - [Restoring a backup](#restoring-a-backup)
 - [Docker](#docker)
 - [Security](#security)
@@ -420,6 +421,44 @@ Nothing runs between backups:
 0 */6 * * *  cd /opt/zesty-backup && zesty-backup backup && zesty-backup upload && zesty-backup clean
 ```
 
+## Encryption
+
+Archives can be encrypted with [age](https://age-encryption.org) before
+they're written to disk, so neither the local disk nor the cloud provider ever
+sees plain data. Encrypted archives are named `….tar.zst.age`.
+
+The recommended setup uses a key pair, where the server only knows the
+**public** key. Someone who breaks into the server or the bucket can't read
+past backups.
+
+```bash
+# On your own machine (install age from https://age-encryption.org or your package manager):
+age-keygen -o zesty-key.txt        # prints: Public key: age1...
+```
+
+```toml
+[encryption]
+recipients = ["age1..."]           # the public key; add several to let any of them decrypt
+```
+
+Store `zesty-key.txt` somewhere safe and **not** on the server. **Without it,
+the backups can't be restored.** To restore:
+
+```bash
+zesty-backup restore backup-incr-20250101-120000.tar.zst.age --identity zesty-key.txt
+# or with the age CLI:
+age -d -i zesty-key.txt backup.tar.zst.age | zstd -d | tar -x
+```
+
+If you'd rather use a passphrase:
+
+1. Set `ZESTY_BACKUP_PASSPHRASE` in the environment, or `passphrase = "…"`
+   under `[encryption]`.
+2. Set the same variable when you run `restore` or `verify`.
+
+You can't use recipients and a passphrase at the same time; age doesn't allow
+mixing them.
+
 ## Restoring a backup
 
 ```bash
@@ -460,9 +499,9 @@ To back up a database from Docker, extend the image or use `command_outputs`.
 
 ## Security
 
-- Archives are **not encrypted** by Zesty. They're written with `0600`
-  permissions locally. For remote copies, use your provider's server-side
-  encryption, or pick a provider that encrypts client-side (MEGA).
+- Archives are written with `0600` permissions. Turn on
+  [encryption](#encryption) so the cloud provider never sees plain data. With
+  a public key, the server can't decrypt its own backups either.
 - Keep `config.toml` private (`chmod 600`). Prefer IAM roles, service
   accounts, or environment variables over keys in the file where possible.
 - Use credentials limited to the backup bucket or folder.
@@ -480,6 +519,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | B2/Azure/GCS "not found" | Check the bucket/container name, and that the key has access to it. |
 | OAuth provider: 401 / `invalid_grant` | The access token expired, or the refresh token was revoked or used twice (Box). Get a new refresh token. |
 | pCloud: `Log in failed` / code 2000 | Wrong token, or wrong `region` (EU accounts need `region = "eu"`). |
+| `This backup is encrypted` | Pass `--identity <key file>`, or set `ZESTY_BACKUP_PASSPHRASE` for passphrase-encrypted backups. |
 | `zesty-backup logs` says no log file | Set `log_dir` in `[logging]`. Under systemd, use `journalctl -u zesty-backup`. |
 
 Use `RUST_LOG=zesty_backup=debug zesty-backup …` for more detail.
@@ -497,6 +537,7 @@ Code layout:
 - `src/main.rs`: the CLI
 - `src/backup.rs`: create, upload, list, download and clean
 - `src/archive.rs`: tar.zst writing, extraction and exclude patterns
+- `src/encryption.rs`: optional age encryption
 - `src/database.rs`: database dumps
 - `src/providers/`: one file per storage backend
 

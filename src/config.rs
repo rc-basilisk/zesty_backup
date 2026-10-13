@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub database: Option<DatabaseConfig>,
     pub system: Option<SystemConfig>,
     pub logging: Option<LoggingConfig>,
+    pub encryption: Option<EncryptionConfig>,
 }
 
 impl AppConfig {
@@ -162,6 +163,22 @@ pub struct LoggingConfig {
     pub level: Option<String>,
     /// When set, logs are also appended to `<log_dir>/zesty-backup.log`.
     pub log_dir: Option<String>,
+}
+
+/// Optional age encryption of archives (see `encryption.rs`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptionConfig {
+    /// Defaults to true when the section is present.
+    pub enabled: Option<bool>,
+    /// age public keys (`age1…`, from `age-keygen`). Recommended.
+    pub recipients: Option<Vec<String>>,
+    /// File with one public key per line.
+    pub recipients_file: Option<String>,
+    /// Alternative to recipients. Prefer the ZESTY_BACKUP_PASSPHRASE env var.
+    pub passphrase: Option<String>,
+    /// Private key file used by `restore`/`verify` (not needed for creating backups).
+    pub identity_file: Option<String>,
 }
 
 pub const LOG_FILE_NAME: &str = "zesty-backup.log";

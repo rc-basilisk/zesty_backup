@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-10-13
 
 A full audit. Several bugs made backups unusable or uploads fail, so upgrading
 is strongly recommended.
@@ -71,6 +71,11 @@ is strongly recommended.
 - Consumer providers no longer require a `bucket`.
 
 ### Added
+- **Optional encryption** with [age](https://age-encryption.org) (`[encryption]`):
+  - Use public-key recipients (recommended) or a passphrase.
+  - Encrypted archives (`.tar.zst.age`) can also be decrypted with the `age`
+    CLI.
+  - `restore` and `verify` take `--identity`.
 - OAuth refresh tokens (`refresh_token`, `client_id`, `client_secret`,
   `token_cache`) for Google Drive, OneDrive, Dropbox and Box, for unattended
   use.
