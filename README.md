@@ -28,6 +28,7 @@ It ships as one binary. You can run each step by hand or leave it running as a d
 - [Checking your setup: doctor](#checking-your-setup-doctor)
 - [Restore drills: proving backups work](#restore-drills-proving-backups-work)
 - [Alerts](#alerts)
+- [Anomaly checks](#anomaly-checks)
 - [Restoring a backup](#restoring-a-backup)
 - [Docker](#docker)
 - [Security](#security)
@@ -95,6 +96,7 @@ elsewhere.
 | `restore <file>` | Extract an archive (`--target <dir>`, default `./restored`). |
 | `verify <file>` | Check that an archive is complete and not corrupted. |
 | `doctor` | Check the setup: paths, encryption keys, database access, and an upload/list/download/delete test on the storage. |
+| `accept-changes` | After an anomaly warning you expected (e.g. you deleted a lot of files): make the newest backup the new normal. |
 | `test-alerts` | Send a test message to every channel in `[alerts]`. |
 | `drill` | Restore the newest remote backup into a temporary folder and check it (files, database, your own commands). |
 | `clean` | Delete backups older than `retention_days`, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
@@ -609,6 +611,44 @@ from the daemon and from cron (`backup`, `upload`, `clean` and `drill` each
 report). Run `zesty-backup test-alerts` to check the setup. A failed alert is
 logged but never stops a backup.
 
+## Anomaly checks
+
+Some failures don't look like failures. The backup "succeeds", but a deploy
+script wiped half the project, the database dump came out empty, or ransomware
+encrypted the files, and now that damage is the newest backup. A week later,
+retention deletes the last good copy.
+
+Every new backup is compared with the median of the previous five, and is
+flagged when:
+
+- the **total size** drops by more than 50%;
+- the **number of files** drops by more than 50%;
+- the **database dump** shrinks by more than 50%, or is missing;
+- the data **stopped compressing**: it used to shrink well and suddenly
+  doesn't, which is what files look like after ransomware has encrypted them.
+
+When that happens:
+
+1. A warning is logged and an alert is sent (healthchecks `/fail`, ntfy,
+   webhook).
+2. **Retention pauses**: `clean` (and the daemon) won't delete any backup
+   while the newest one looks wrong. `status` and `doctor` show it.
+3. If the change was expected, run `zesty-backup accept-changes`. The newest
+   backup becomes the new normal and retention resumes. `clean --force` also
+   overrides the pause.
+
+The checks are on by default. Tune or disable them:
+
+```toml
+[anomaly]
+size_drop_percent = 50        # flag when the total size drops by more than this
+files_drop_percent = 50
+database_drop_percent = 50
+incompressible_ratio = 0.9    # flag data that suddenly compresses to more than 90% of its size
+pause_retention = true
+# enabled = false
+```
+
 ## Restoring a backup
 
 ```bash
@@ -670,6 +710,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | OAuth provider: 401 / `invalid_grant` | The access token expired, or the refresh token was revoked or used twice (Box). Get a new refresh token. |
 | pCloud: `Log in failed` / code 2000 | Wrong token, or wrong `region` (EU accounts need `region = "eu"`). |
 | `This backup is encrypted` | Pass `--identity <key file>`, or set `ZESTY_BACKUP_PASSPHRASE` for passphrase-encrypted backups. |
+| `Not deleting any backup: the newest backup … looked wrong` | An anomaly paused retention. If the change was expected, run `zesty-backup accept-changes`. |
 | No alerts arrive | Run `zesty-backup test-alerts`: it shows each channel's error. |
 | Drill: `docker run … failed` | Is Docker running, and may this user use it? "rate limit" means Docker Hub throttled the image download: retry later or `docker login`. |
 | Drill: database restore has errors | A missing extension or role, or an image older than your server. Set `drill.database_image`. |
@@ -692,6 +733,7 @@ Code layout:
 - `src/archive.rs`: tar.zst writing, extraction and exclude patterns
 - `src/encryption.rs`: optional age encryption
 - `src/alerts.rs`: healthchecks/ntfy/webhook notifications
+- `src/anomaly.rs`: comparing each backup with the previous ones
 - `src/doctor.rs`, `src/drill.rs`: setup checks and restore drills (shared report format in `src/report.rs`)
 - `src/database.rs`: database dumps
 - `src/providers/`: one file per storage backend

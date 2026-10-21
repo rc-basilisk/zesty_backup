@@ -10,7 +10,7 @@ use zesty_backup::backup::{self, human_size, REMOTE_PREFIX};
 use zesty_backup::config::{AppConfig, StorageConfig, EXAMPLE_CONFIG};
 use zesty_backup::encryption::DecryptionKeys;
 use zesty_backup::providers::{self, StorageProvider};
-use zesty_backup::{doctor, drill};
+use zesty_backup::{anomaly, doctor, drill};
 
 #[derive(Parser)]
 #[command(name = "zesty-backup")]
@@ -67,7 +67,12 @@ enum Commands {
         /// Only clean local backups
         #[arg(long)]
         local_only: bool,
+        /// Delete even while retention is paused because the newest backup looked wrong
+        #[arg(long)]
+        force: bool,
     },
+    /// Accept the newest backup as normal after an anomaly warning (e.g. you really deleted files)
+    AcceptChanges,
     /// Extract a backup archive
     Restore {
         /// Backup file path
@@ -270,16 +275,7 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
     let alerter = Alerter::new(config.alerts.as_ref());
     match command {
         Commands::Backup { full } => {
-            let result = tokio::task::spawn_blocking(move || backup::create_backup(&config, full))
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|r| r);
-            alerter
-                .notify(&Event::from_result(EventKind::Backup, &result, |p| {
-                    describe_archive(p)
-                }))
-                .await;
-            result?;
+            backup_and_alert(std::sync::Arc::new(config), full, &alerter).await?;
         }
         Commands::Upload { file } => {
             let result = async {
@@ -320,6 +316,7 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
         Commands::Clean {
             dry_run,
             local_only,
+            force,
         } => {
             let result = async {
                 let provider = if local_only {
@@ -327,7 +324,7 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
                 } else {
                     Some(providers::from_config(&config.storage).await?)
                 };
-                backup::clean(provider.as_deref(), &config, dry_run).await
+                backup::clean_with(provider.as_deref(), &config, dry_run, force).await
             }
             .await;
             if !dry_run {
@@ -395,6 +392,13 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
                 std::process::exit(1);
             }
         }
+        Commands::AcceptChanges => match anomaly::accept(&config)? {
+            Some(name) => println!(
+                "{} is now the baseline for anomaly checks; retention resumes.",
+                name
+            ),
+            None => println!("No backup history yet: nothing to accept."),
+        },
         Commands::TestAlerts => {
             if !alerter.is_configured() {
                 bail!("No alert channels configured: add an [alerts] section (see README)");
@@ -620,19 +624,29 @@ async fn run_daemon(
 }
 
 async fn run_backup(config: &std::sync::Arc<AppConfig>, alerter: &Alerter) {
-    let config = config.clone();
-    let result = tokio::task::spawn_blocking(move || backup::create_backup(&config, false))
+    if let Err(e) = backup_and_alert(config.clone(), false, alerter).await {
+        error!("Scheduled backup failed: {:#}", e);
+    }
+}
+
+/// Create a backup, run the anomaly checks, and report the result to the alert channels.
+async fn backup_and_alert(
+    config: std::sync::Arc<AppConfig>,
+    full: bool,
+    alerter: &Alerter,
+) -> Result<PathBuf> {
+    let result = tokio::task::spawn_blocking(move || backup::create_backup_checked(&config, full))
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-    if let Err(e) = &result {
-        error!("Scheduled backup failed: {:#}", e);
-    }
-    alerter
-        .notify(&Event::from_result(EventKind::Backup, &result, |p| {
-            describe_archive(p)
-        }))
-        .await;
+    let event = match &result {
+        Ok(outcome) if !outcome.anomalies.is_empty() => {
+            Event::anomaly(&outcome.stats.name, &outcome.anomalies)
+        }
+        _ => Event::from_result(EventKind::Backup, &result, |o| describe_archive(&o.path)),
+    };
+    alerter.notify(&event).await;
+    result.map(|o| o.path)
 }
 
 fn describe_archive(path: &Path) -> String {
@@ -761,6 +775,10 @@ async fn show_status(config: &AppConfig, config_path: &str) {
             }
         }
         Err(e) => println!("  Remote backups:    unavailable ({:#})", e),
+    }
+    if let Some(reason) = anomaly::retention_pause_reason(config) {
+        println!("  Retention:         PAUSED, {}", reason);
+        println!("                     (run `zesty-backup accept-changes` if this was expected)");
     }
     match drill::load_last(config) {
         Some(last) => {

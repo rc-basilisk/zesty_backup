@@ -161,6 +161,20 @@ etc_dirs = [
 # work_dir = "/var/tmp"                     # needs room for one backup + its contents
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [anomaly]: optional, ON by default. Each new backup is compared with the
+# previous ones; a sudden drop in size, file count or database dump size, or
+# data that stops compressing (ransomware), raises an alert and pauses
+# retention until you run `zesty-backup accept-changes`.
+# ─────────────────────────────────────────────────────────────────────────────
+# [anomaly]
+# size_drop_percent = 50
+# files_drop_percent = 50
+# database_drop_percent = 50
+# incompressible_ratio = 0.9
+# pause_retention = true
+# enabled = false
+
+# ─────────────────────────────────────────────────────────────────────────────
 # [alerts]: optional. Get told when something fails (and notice when backups
 # silently stop). Test with: zesty-backup test-alerts
 # ─────────────────────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub encryption: Option<EncryptionConfig>,
     pub drill: Option<DrillConfig>,
     pub alerts: Option<AlertsConfig>,
+    pub anomaly: Option<AnomalyConfig>,
 }
 
 impl AppConfig {
@@ -54,6 +55,24 @@ impl AppConfig {
                     anyhow::anyhow!("drill.files: invalid pattern {:?}: {}", pattern, e)
                 })?;
             }
+        }
+        if let Some(a) = &self.anomaly {
+            for (name, v) in [
+                ("size_drop_percent", a.size_drop_percent),
+                ("files_drop_percent", a.files_drop_percent),
+                ("database_drop_percent", a.database_drop_percent),
+            ] {
+                anyhow::ensure!(
+                    v.is_none_or(|v| v <= 100),
+                    "anomaly.{} must be between 0 and 100",
+                    name
+                );
+            }
+            anyhow::ensure!(
+                a.incompressible_ratio
+                    .is_none_or(|r| (0.0..=1.0).contains(&r)),
+                "anomaly.incompressible_ratio must be between 0 and 1"
+            );
         }
         if let Some(alerts) = &self.alerts {
             for (name, url) in [
@@ -211,6 +230,23 @@ pub struct EncryptionConfig {
     pub passphrase: Option<String>,
     /// Private key file used by `restore`/`verify` (not needed for creating backups).
     pub identity_file: Option<String>,
+}
+
+/// Anomaly checks on each new backup (see `anomaly.rs`). On by default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnomalyConfig {
+    pub enabled: Option<bool>,
+    /// Flag a backup whose total size dropped by more than this percentage (default 50).
+    pub size_drop_percent: Option<u8>,
+    /// Same for the number of files (default 50).
+    pub files_drop_percent: Option<u8>,
+    /// Same for the database dump (default 50). A missing dump is always flagged.
+    pub database_drop_percent: Option<u8>,
+    /// Flag data that suddenly compresses to more than this fraction of its size (default 0.9).
+    pub incompressible_ratio: Option<f64>,
+    /// Don't delete old backups while the newest one is flagged (default true).
+    pub pause_retention: Option<bool>,
 }
 
 /// Where to report successes and failures (see `alerts.rs`).

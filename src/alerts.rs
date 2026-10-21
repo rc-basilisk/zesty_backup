@@ -16,6 +16,7 @@ pub enum EventKind {
     Upload,
     Clean,
     Drill,
+    Anomaly,
     Test,
 }
 
@@ -26,6 +27,7 @@ impl EventKind {
             EventKind::Upload => "upload",
             EventKind::Clean => "clean",
             EventKind::Drill => "drill",
+            EventKind::Anomaly => "anomaly",
             EventKind::Test => "test",
         }
     }
@@ -58,6 +60,23 @@ impl Event {
             success: false,
             summary: format!("{} failed", kind.as_str()),
             details: Some(format!("{:#}", error)),
+        }
+    }
+
+    /// For a backup flagged by the anomaly checks.
+    pub fn anomaly(backup: &str, anomalies: &[String]) -> Self {
+        Self {
+            kind: EventKind::Anomaly,
+            success: false,
+            summary: format!("backup {} looks wrong; old backups are kept", backup),
+            details: Some(format!(
+                "{}\n\nIf this was expected, run `zesty-backup accept-changes`.",
+                anomalies
+                    .iter()
+                    .map(|a| format!("- {}", a))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )),
         }
     }
 
@@ -180,6 +199,9 @@ impl Alerter {
     }
 
     fn title(&self, event: &Event) -> String {
+        if event.kind == EventKind::Anomaly {
+            return format!("zesty-backup on {}: backup anomaly", self.server);
+        }
         let status = if event.success { "OK" } else { "FAILED" };
         format!(
             "zesty-backup on {}: {} {}",

@@ -45,7 +45,23 @@ fn sort_key(name: &str) -> (Option<DateTime<Utc>>, String) {
 ///
 /// Every backup is a complete snapshot; `full` only changes the file name
 /// (`backup-full-…` vs `backup-incr-…`) so you can tell manual and scheduled backups apart.
+/// A new backup and what the anomaly checks thought of it.
+#[derive(Debug)]
+pub struct BackupOutcome {
+    pub path: PathBuf,
+    pub stats: crate::anomaly::BackupStats,
+    /// Empty when the backup looks normal.
+    pub anomalies: Vec<String>,
+}
+
+/// Create a backup archive in `local_backup_dir` and return its path.
+/// See [`create_backup_checked`] for the anomaly checks.
 pub fn create_backup(config: &AppConfig, full: bool) -> Result<PathBuf> {
+    create_backup_checked(config, full).map(|o| o.path)
+}
+
+/// Create a backup and compare it with the previous ones (see `anomaly.rs`).
+pub fn create_backup_checked(config: &AppConfig, full: bool) -> Result<BackupOutcome> {
     let backup = &config.backup;
     let project = Path::new(&backup.project_path);
     if !project.exists() {
@@ -128,6 +144,7 @@ pub fn create_backup(config: &AppConfig, full: bool) -> Result<PathBuf> {
     }
 
     let skipped = archive.skipped();
+    let content = archive.stats();
     let path = archive.finish()?;
     let size = fs::metadata(&path)?.len();
     info!("Backup created: {} ({})", path.display(), human_size(size));
@@ -137,7 +154,26 @@ pub fn create_backup(config: &AppConfig, full: bool) -> Result<PathBuf> {
             skipped
         );
     }
-    Ok(path)
+
+    let stats = crate::anomaly::BackupStats::new(&name, content, size);
+    let anomalies = match crate::anomaly::record(config, stats.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("Could not update the backup history: {:#}", e);
+            Vec::new()
+        }
+    };
+    for a in &anomalies {
+        warn!("Anomaly: {}", a);
+    }
+    if !anomalies.is_empty() {
+        warn!("Old backups will be kept until a normal backup is made (or run `zesty-backup accept-changes`)");
+    }
+    Ok(BackupOutcome {
+        path,
+        stats,
+        anomalies,
+    })
 }
 
 fn base_name(path: &Path) -> String {
@@ -403,6 +439,25 @@ pub async fn clean(
     config: &AppConfig,
     dry_run: bool,
 ) -> Result<()> {
+    clean_with(provider, config, dry_run, false).await
+}
+
+/// Like [`clean`]; `force` deletes even while retention is paused by an anomaly.
+pub async fn clean_with(
+    provider: Option<&dyn StorageProvider>,
+    config: &AppConfig,
+    dry_run: bool,
+    force: bool,
+) -> Result<()> {
+    if !force {
+        if let Some(reason) = crate::anomaly::retention_pause_reason(config) {
+            warn!(
+                "Not deleting any backup: {}. Run `zesty-backup accept-changes` if this was expected, or `clean --force`.",
+                reason
+            );
+            return Ok(());
+        }
+    }
     let retention = config.backup.retention_days();
     let cutoff = Utc::now() - chrono::Duration::days(retention as i64);
     info!(

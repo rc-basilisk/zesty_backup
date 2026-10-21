@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Failures only by default (`notify_success` for everything). Works from the
   daemon and from cron. `zesty-backup test-alerts` checks the channels.
+- **Anomaly checks**, on by default (`[anomaly]`). Each backup is compared
+  with the median of the previous five, and is flagged when:
+  - total size or file count drops by more than 50%;
+  - the database dump shrinks or disappears;
+  - the data stops compressing (a ransomware signature).
+
+  A flagged backup sends an alert and pauses retention, so good old backups
+  aren't rotated out. `zesty-backup accept-changes` accepts an expected
+  change; `clean --force` overrides the pause.
 
 ## [2.0.0] - 2026-10-13
 

@@ -94,6 +94,26 @@ pub struct ArchiveWriter {
     partial_path: PathBuf,
     final_path: PathBuf,
     skipped: usize,
+    stats: ContentStats,
+}
+
+/// What went into an archive (before compression), for spotting anomalies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentStats {
+    pub files: u64,
+    pub bytes: u64,
+    /// Bytes under `database/` (the database dump).
+    pub database_bytes: u64,
+}
+
+impl ContentStats {
+    fn add(&mut self, archive_path: &str, len: u64) {
+        self.files += 1;
+        self.bytes += len;
+        if archive_path.starts_with("database/") {
+            self.database_bytes += len;
+        }
+    }
 }
 
 impl ArchiveWriter {
@@ -131,12 +151,18 @@ impl ArchiveWriter {
             partial_path,
             final_path: path.to_path_buf(),
             skipped: 0,
+            stats: ContentStats::default(),
         })
     }
 
     /// Number of files that could not be read and were left out.
     pub fn skipped(&self) -> usize {
         self.skipped
+    }
+
+    /// Files and bytes added so far.
+    pub fn stats(&self) -> ContentStats {
+        self.stats
     }
 
     /// Add a file or a whole directory tree under `archive_prefix`.
@@ -216,9 +242,12 @@ impl ArchiveWriter {
                 return Ok(());
             }
         };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         self.builder()
             .append_file(archive_path, &mut file)
-            .with_context(|| format!("Failed to add {} to archive", path.display()))
+            .with_context(|| format!("Failed to add {} to archive", path.display()))?;
+        self.stats.add(archive_path, len);
+        Ok(())
     }
 
     /// Add in-memory content as a regular file (mode 0644, mtime = now).
@@ -228,9 +257,12 @@ impl ArchiveWriter {
         header.set_mode(0o644);
         header.set_mtime(chrono::Utc::now().timestamp().max(0) as u64);
         header.set_entry_type(tar::EntryType::Regular);
+        let archive_path = archive_path.trim_start_matches('/');
         self.builder()
-            .append_data(&mut header, archive_path.trim_start_matches('/'), data)
-            .with_context(|| format!("Failed to add {} to archive", archive_path))
+            .append_data(&mut header, archive_path, data)
+            .with_context(|| format!("Failed to add {} to archive", archive_path))?;
+        self.stats.add(archive_path, data.len() as u64);
+        Ok(())
     }
 
     /// Write the tar trailer, finish the zstd frame, fsync and move the file into place.

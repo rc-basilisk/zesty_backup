@@ -27,6 +27,11 @@ pub async fn run(config: &AppConfig, options: &DoctorOptions<'_>) -> Report {
     check_local(config, &mut report);
     check_encryption(config, options.identity, &mut report);
     check_dependencies(config, &mut report);
+    if let Some(reason) = crate::anomaly::retention_pause_reason(config) {
+        report
+            .warn("Retention", format!("paused: {}", reason))
+            .hint("if the change was expected, run `zesty-backup accept-changes`");
+    }
     if crate::alerts::Alerter::new(config.alerts.as_ref()).is_configured() {
         report.pass(
             "Alerts",
