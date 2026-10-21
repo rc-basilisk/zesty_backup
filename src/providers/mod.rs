@@ -23,6 +23,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
+// async_trait's generated code trips clippy::double_must_use on newer toolchains.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
     async fn upload(&self, key: &str, file_path: &Path) -> Result<()>;
