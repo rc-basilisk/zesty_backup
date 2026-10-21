@@ -25,6 +25,8 @@ It ships as one binary. You can run each step by hand or leave it running as a d
 - [Storage providers](#storage-providers)
 - [Running on a schedule](#running-on-a-schedule)
 - [Encryption](#encryption)
+- [Checking your setup: doctor](#checking-your-setup-doctor)
+- [Restore drills: proving backups work](#restore-drills-proving-backups-work)
 - [Restoring a backup](#restoring-a-backup)
 - [Docker](#docker)
 - [Security](#security)
@@ -55,7 +57,13 @@ Then edit `config.toml`. At minimum, set:
 - `[backup] project_path`: the folder to back up
 - `[backup] local_backup_dir`: where archives are written
 
-**3. Run a backup and upload it.**
+**3. Check the setup.**
+
+```bash
+zesty-backup doctor          # paths, keys, database access, and a real upload/download test
+```
+
+**4. Run a backup and upload it.**
 
 ```bash
 zesty-backup backup          # creates ./backups/backup-incr-<date>.tar.zst
@@ -63,7 +71,13 @@ zesty-backup upload          # uploads every backup that isn't in the cloud yet
 zesty-backup list --remote   # check it arrived
 ```
 
-**4. Automate it** with the [daemon or a systemd timer](#running-on-a-schedule).
+**5. Prove it can be restored.**
+
+```bash
+zesty-backup drill           # restores the latest remote backup somewhere temporary and checks it
+```
+
+**6. Automate it** with the [daemon or a systemd timer](#running-on-a-schedule).
 
 ## Commands
 
@@ -79,6 +93,8 @@ elsewhere.
 | `download <name>` | Download a backup (`--output <dir>`, default `./restored`). |
 | `restore <file>` | Extract an archive (`--target <dir>`, default `./restored`). |
 | `verify <file>` | Check that an archive is complete and not corrupted. |
+| `doctor` | Check the setup: paths, encryption keys, database access, and an upload/list/download/delete test on the storage. |
+| `drill` | Restore the newest remote backup into a temporary folder and check it (files, database, your own commands). |
 | `clean` | Delete backups older than `retention_days`, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
 | `daemon` | Keep running: back up, upload and clean on a schedule. |
 | `client …` | Use remote backups without a config file (e.g. from your laptop). |
@@ -459,6 +475,104 @@ If you'd rather use a passphrase:
 You can't use recipients and a passphrase at the same time; age doesn't allow
 mixing them.
 
+## Checking your setup: doctor
+
+`zesty-backup doctor` checks everything a backup needs, without making one:
+
+```text
+$ zesty-backup doctor
+  ✔ Project path         /srv/myshop (12 entries)
+  ✔ Backup directory     /var/backups/myshop is writable (8 backups, 1.21 GiB)
+  ✔ Encryption           on (public key); your private key decrypts it
+  ✔ Database             pg_dump connected to shop on 127.0.0.1 (schema-only test)
+  ✔ Storage credentials  b2 client ready
+  ✔ Remote backups       8 backup(s), newest backup-incr-20261021-180000.tar.zst (3h old)
+  ✔ Storage upload       backups/zesty-doctor-20261021-210000.txt (256.00 KiB) in 0.4s
+  ✔ Storage list         test file listed with the right size
+  ✔ Storage download     identical content, 0.3s
+  ✖ Storage delete       HTTP 403 Forbidden: AccessDenied
+                         → retention (`clean`) will not work without delete permission
+Result: FAILED (1 failed, 0 warning(s))
+```
+
+What it checks:
+
+- **Local:** that `project_path` is readable and `local_backup_dir` writable.
+- **Encryption:** encrypts and decrypts a sample with your config. Pass
+  `--identity key.txt` to prove your private key matches the configured public
+  key. A backup you can't decrypt is not a backup.
+- **Database:** runs a schema-only dump with your real settings. This catches
+  wrong passwords, unreachable hosts and a `pg_dump` older than the server.
+- **Storage:** uploads a small test file, lists it, downloads it, compares it
+  and deletes it. Failures come with a hint (wrong credentials, missing
+  permission, wrong bucket name, network).
+
+`--skip-storage` skips the remote part. The exit code is 1 when something fails,
+so `doctor` also works in scripts and CI.
+
+## Restore drills: proving backups work
+
+A backup is only as good as its last successful restore. `zesty-backup drill`
+does one for you, safely:
+
+1. Takes the newest **remote** backup (or `--local`, or a given name) and
+   checks it is recent enough.
+2. Downloads, decrypts and extracts it into a temporary folder.
+3. Checks that the files you care about are there.
+4. Loads the database dump into a **throwaway Docker container**, then runs
+   your SQL checks on it. The image is picked from the version in the dump
+   (e.g. `postgres:16-alpine`). The container is removed afterwards.
+5. Runs your own commands in the restored folder.
+6. Deletes everything (unless `--keep`), and records the result for `status`.
+
+```text
+$ zesty-backup drill
+Restore drill: backup-incr-20261021-233656.tar.zst
+  ✔ Find backup       backup-incr-20261021-233656.tar.zst (remote)
+  ✔ Freshness         newest backup is 3.2h old (limit 26h)
+  ✔ Download          412.80 MiB in 9.1s
+  ✔ Extract           18342 files, 1.37 GiB in 6.4s
+  ✔ Project files     18341 files under project/
+  ✔ File check        project/myshop/.env (1 match)
+  ✔ Database dump     database/shop.sql (220.17 MiB)
+  ✔ Database restore  42 tables restored into postgres:16-alpine in 48.2s
+  ✔ Database check    SELECT count(*) >= 1000 FROM users → t
+  ✔ Command           .env has APP_KEY (0.0s)
+Result: PASSED
+```
+
+Configure what "usable" means in `[drill]`:
+
+```toml
+[drill]
+max_age_hours = 26                       # fail if the newest backup is older
+files = ["project/myshop/.env", "project/myshop/public/**"]
+database_checks = [                      # each must return something other than empty/0/false
+  "SELECT count(*) >= 1000 FROM users",
+  "SELECT max(created_at) > now() - interval '2 days' FROM orders",
+]
+commands = [                             # run with sh in the restored folder; must exit 0
+  { name = "config parses", run = "php -l project/myshop/config/app.php" },
+]
+interval_hours = 168                     # the daemon runs a drill weekly
+```
+
+Notes:
+
+- **Database restore tests** work for PostgreSQL, MySQL and MariaDB. They
+  need Docker (or `container_runtime = "podman"`). SQLite is checked with
+  `sqlite3` (`PRAGMA integrity_check`). For other database types, the drill
+  checks that the dump is present.
+- **Encrypted backups:** the drill needs the private key. With public-key
+  encryption the server doesn't have it, which is the point, so run drills
+  from another machine, e.g. your laptop or a second server. That machine
+  needs a copy of the config, `identity_file` (or `--identity`), and a cron
+  entry. Without a key, the drill tells you it couldn't look inside the backup
+  instead of pretending it passed.
+- **Disk space:** the drill needs room for the backup and its extracted
+  contents. Point `work_dir` at a big disk if `/tmp` is small.
+- **Exit code** is 1 when a check fails, so cron/systemd can alert on it.
+
 ## Restoring a backup
 
 ```bash
@@ -520,6 +634,8 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | OAuth provider: 401 / `invalid_grant` | The access token expired, or the refresh token was revoked or used twice (Box). Get a new refresh token. |
 | pCloud: `Log in failed` / code 2000 | Wrong token, or wrong `region` (EU accounts need `region = "eu"`). |
 | `This backup is encrypted` | Pass `--identity <key file>`, or set `ZESTY_BACKUP_PASSPHRASE` for passphrase-encrypted backups. |
+| Drill: `docker run … failed` | Is Docker running, and may this user use it? "rate limit" means Docker Hub throttled the image download: retry later or `docker login`. |
+| Drill: database restore has errors | A missing extension or role, or an image older than your server. Set `drill.database_image`. |
 | `zesty-backup logs` says no log file | Set `log_dir` in `[logging]`. Under systemd, use `journalctl -u zesty-backup`. |
 
 Use `RUST_LOG=zesty_backup=debug zesty-backup …` for more detail.
@@ -538,6 +654,7 @@ Code layout:
 - `src/backup.rs`: create, upload, list, download and clean
 - `src/archive.rs`: tar.zst writing, extraction and exclude patterns
 - `src/encryption.rs`: optional age encryption
+- `src/doctor.rs`, `src/drill.rs`: setup checks and restore drills (shared report format in `src/report.rs`)
 - `src/database.rs`: database dumps
 - `src/providers/`: one file per storage backend
 

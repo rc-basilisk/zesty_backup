@@ -144,6 +144,23 @@ etc_dirs = [
 # identity_file = "/path/key.txt" # private key, only needed where you run restore/verify
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [drill]: optional. What `zesty-backup drill` checks after restoring the latest
+# backup into a temporary folder. Paths are as stored in the archive
+# (project/<folder>/..., system/..., database/...).
+# Database restore tests need Docker (postgres, mysql, mariadb).
+# ─────────────────────────────────────────────────────────────────────────────
+# [drill]
+# max_age_hours = 26                        # fail if the newest backup is older
+# files = ["project/myapp/.env"]            # globs; each must match at least one file
+# database_checks = ["SELECT count(*) > 0 FROM users"]   # must not return empty/0/false
+# commands = [{ name = "smoke test", run = "test -s project/myapp/.env" }]
+# interval_hours = 168                      # let the daemon run a drill weekly
+# database_restore = true                   # load the dump into a throwaway container
+# database_image = "postgres:16-alpine"     # default: picked from the dump's server version
+# container_runtime = "docker"              # or "podman"
+# work_dir = "/var/tmp"                     # needs room for one backup + its contents
+
+# ─────────────────────────────────────────────────────────────────────────────
 # [logging]: optional
 # ─────────────────────────────────────────────────────────────────────────────
 [logging]

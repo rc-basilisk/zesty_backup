@@ -9,6 +9,7 @@ use zesty_backup::backup::{self, human_size, REMOTE_PREFIX};
 use zesty_backup::config::{AppConfig, StorageConfig, EXAMPLE_CONFIG};
 use zesty_backup::encryption::DecryptionKeys;
 use zesty_backup::providers::{self, StorageProvider};
+use zesty_backup::{doctor, drill};
 
 #[derive(Parser)]
 #[command(name = "zesty-backup")]
@@ -112,6 +113,29 @@ enum Commands {
         /// Overwrite the file if it exists
         #[arg(long)]
         force: bool,
+    },
+    /// Check the whole setup: paths, encryption keys, database access, storage round trip
+    Doctor {
+        /// age private key, to prove it matches the configured public key
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+        /// Don't touch remote storage
+        #[arg(long)]
+        skip_storage: bool,
+    },
+    /// Restore the latest backup into a temporary place and check that it is usable
+    Drill {
+        /// Backup to test (default: the newest)
+        backup: Option<String>,
+        /// Test a local backup instead of downloading the remote one
+        #[arg(long)]
+        local: bool,
+        /// age private key, for encrypted backups (passphrase: ZESTY_BACKUP_PASSPHRASE)
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+        /// Keep the restored files and print where they are
+        #[arg(long)]
+        keep: bool,
     },
     /// Show configuration and backup counts
     Status,
@@ -288,6 +312,51 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
             upload_interval,
             pid_file,
         } => run_daemon(config, backup_interval, upload_interval, pid_file).await?,
+        Commands::Doctor {
+            identity,
+            skip_storage,
+        } => {
+            let options = doctor::DoctorOptions {
+                identity: identity.as_deref(),
+                skip_storage,
+            };
+            println!("Zesty Backup doctor ({})", config_path);
+            let report = doctor::run(&config, &options).await;
+            println!("{}", report);
+            if !report.passed() {
+                std::process::exit(1);
+            }
+        }
+        Commands::Drill {
+            backup,
+            local,
+            identity,
+            keep,
+        } => {
+            let provider = if local {
+                None
+            } else {
+                Some(providers::from_config(&config.storage).await?)
+            };
+            let options = drill::DrillOptions {
+                backup: backup.as_deref(),
+                local,
+                identity: identity.as_deref(),
+                keep,
+            };
+            let outcome = drill::run(&config, provider.as_deref(), &options).await;
+            println!(
+                "Restore drill: {}",
+                outcome.backup.as_deref().unwrap_or("(no backup)")
+            );
+            println!("{}", outcome.report);
+            if let Some(dir) = &outcome.kept_dir {
+                println!("Restored files kept in {}", dir.display());
+            }
+            if !outcome.report.passed() {
+                std::process::exit(1);
+            }
+        }
         Commands::Status => show_status(&config, config_path).await,
         Commands::Logs { lines } => show_logs(&config, lines)?,
         Commands::GenerateConfig { .. }
@@ -446,6 +515,16 @@ async fn run_daemon(
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     }
 
+    // Optional scheduled restore drills; the first one runs after one interval.
+    let drill_hours = config.drill.as_ref().and_then(|d| d.interval_hours);
+    let mut drill_timer =
+        tokio::time::interval(Duration::from_secs(drill_hours.unwrap_or(24 * 365) * 3600));
+    drill_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    drill_timer.tick().await;
+    if let Some(h) = drill_hours {
+        info!("Restore drills every {}h", h);
+    }
+
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -460,6 +539,7 @@ async fn run_daemon(
             _ = &mut shutdown => break,
             _ = backup_timer.tick() => run_backup(&config).await,
             _ = upload_timer.tick() => run_upload(provider.as_ref(), &config).await,
+            _ = drill_timer.tick(), if drill_hours.is_some() => run_drill(provider.as_ref(), &config).await,
         }
     }
 
@@ -476,6 +556,22 @@ async fn run_backup(config: &std::sync::Arc<AppConfig>) {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => error!("Scheduled backup failed: {:#}", e),
         Err(e) => error!("Scheduled backup panicked: {}", e),
+    }
+}
+
+async fn run_drill(provider: &dyn StorageProvider, config: &AppConfig) {
+    info!("Scheduled restore drill starting");
+    let outcome = drill::run(config, Some(provider), &drill::DrillOptions::default()).await;
+    let backup = outcome.backup.as_deref().unwrap_or("(no backup)");
+    if outcome.report.passed() {
+        info!("Restore drill of {}: {}", backup, outcome.report.summary());
+    } else {
+        error!(
+            "Restore drill of {}: {}\n{}",
+            backup,
+            outcome.report.summary(),
+            outcome.report
+        );
     }
 }
 
@@ -566,6 +662,18 @@ async fn show_status(config: &AppConfig, config_path: &str) {
             }
         }
         Err(e) => println!("  Remote backups:    unavailable ({:#})", e),
+    }
+    match drill::load_last(config) {
+        Some(last) => {
+            let ago = (chrono::Utc::now() - last.time).num_hours();
+            println!(
+                "  Last drill:        {} ({}h ago, {})",
+                last.summary,
+                ago,
+                last.backup.as_deref().unwrap_or("no backup")
+            );
+        }
+        None => println!("  Last drill:        never (run `zesty-backup drill`)"),
     }
 }
 

@@ -117,7 +117,8 @@ impl DecryptionKeys {
         }
     }
 
-    fn decrypt<R: Read + 'static>(&self, input: R) -> Result<Box<dyn Read>> {
+    /// Decrypt an age stream (binary, not armored).
+    pub fn decrypt<R: Read + 'static>(&self, input: R) -> Result<Box<dyn Read>> {
         let decryptor = age::Decryptor::new(input).context("Invalid age file")?;
         if decryptor.is_scrypt() {
             let Some(p) = &self.passphrase else {
@@ -148,6 +149,13 @@ impl DecryptionKeys {
             .context("Decryption failed (no matching key in the identity file)")?;
         Ok(Box::new(reader))
     }
+}
+
+/// True when the file is an age file (binary or armored).
+pub fn is_encrypted(path: &Path) -> Result<bool> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let head = reader.fill_buf()?;
+    Ok(head.starts_with(AGE_MAGIC) || head.starts_with(AGE_ARMOR_MAGIC))
 }
 
 /// Open an archive for reading, decrypting it first if it is an age file.

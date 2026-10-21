@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub system: Option<SystemConfig>,
     pub logging: Option<LoggingConfig>,
     pub encryption: Option<EncryptionConfig>,
+    pub drill: Option<DrillConfig>,
 }
 
 impl AppConfig {
@@ -41,6 +42,17 @@ impl AppConfig {
         }
         if let Some(n) = self.backup.incremental_per_day {
             anyhow::ensure!(n > 0, "backup.incremental_per_day must be at least 1");
+        }
+        if let Some(drill) = &self.drill {
+            anyhow::ensure!(
+                drill.interval_hours != Some(0) && drill.max_age_hours != Some(0),
+                "drill.interval_hours and drill.max_age_hours must be at least 1"
+            );
+            for pattern in drill.files.iter().flatten() {
+                globset::Glob::new(pattern).map_err(|e| {
+                    anyhow::anyhow!("drill.files: invalid pattern {:?}: {}", pattern, e)
+                })?;
+            }
         }
         if let Some(h) = self.backup.upload_interval_hours {
             anyhow::ensure!(h > 0, "backup.upload_interval_hours must be at least 1");
@@ -179,6 +191,46 @@ pub struct EncryptionConfig {
     pub passphrase: Option<String>,
     /// Private key file used by `restore`/`verify` (not needed for creating backups).
     pub identity_file: Option<String>,
+}
+
+/// Restore drills (`zesty-backup drill`): restore the latest backup somewhere temporary
+/// and check that it is actually usable.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrillConfig {
+    /// Fail when the newest backup is older than this.
+    pub max_age_hours: Option<u64>,
+    /// Glob patterns (archive paths, e.g. "project/myapp/.env") that must match at least one file.
+    pub files: Option<Vec<String>>,
+    /// Shell commands run inside the restored folder; each must exit with 0.
+    pub commands: Option<Vec<DrillCommand>>,
+    /// Load the database dump into a throwaway container (default: true when [database] is enabled).
+    pub database_restore: Option<bool>,
+    /// Container image for that (default: chosen from the version in the dump, e.g. postgres:16).
+    pub database_image: Option<String>,
+    /// SQL queries run on the restored database; each must return a value that is not empty, 0 or false.
+    pub database_checks: Option<Vec<String>>,
+    /// "docker" (default) or "podman".
+    pub container_runtime: Option<String>,
+    /// Where the backup is downloaded and extracted (default: the system temp dir).
+    pub work_dir: Option<String>,
+    /// When set, `daemon` runs a drill this often.
+    pub interval_hours: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrillCommand {
+    /// Shown in the report (default: the command itself).
+    pub name: Option<String>,
+    /// Run with `sh -c` in the restored folder; $ZESTY_RESTORE_DIR points to it.
+    pub run: String,
+}
+
+impl DrillConfig {
+    pub fn runtime(&self) -> &str {
+        self.container_runtime.as_deref().unwrap_or("docker")
+    }
 }
 
 pub const LOG_FILE_NAME: &str = "zesty-backup.log";

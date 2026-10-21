@@ -6,5 +6,8 @@ pub mod archive;
 pub mod backup;
 pub mod config;
 pub mod database;
+pub mod doctor;
+pub mod drill;
 pub mod encryption;
 pub mod providers;
+pub mod report;

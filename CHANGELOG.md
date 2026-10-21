@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`zesty-backup doctor`** checks the whole setup without making a backup:
+  - paths;
+  - encryption, with an encrypt/decrypt round trip; `--identity` proves the
+    private key matches;
+  - database access, with a schema-only dump using the real settings;
+  - commands and units;
+  - Docker for drills;
+  - remote backup freshness;
+  - an upload/list/download/delete round trip on the real storage.
+
+  Failures come with hints, and the exit code is 1 when something fails.
+- **`zesty-backup drill`** runs restore drills:
+  - downloads the newest remote backup (or `--local`, or a named one);
+  - checks freshness (`max_age_hours`);
+  - decrypts and extracts it into a temporary folder;
+  - checks that the expected files exist (`files` globs);
+  - loads the PostgreSQL/MySQL/MariaDB dump into a throwaway Docker/Podman
+    container, picking the image from the dump's server version, and runs
+    `database_checks` SQL queries;
+  - checks SQLite with `PRAGMA integrity_check`;
+  - runs your own `commands`.
+
+  The result is saved and shown by `status`.
+- `[drill] interval_hours` lets the daemon run drills on a schedule.
+
 ## [2.0.0] - 2026-10-13
 
 A full audit. Several bugs made backups unusable or uploads fail, so upgrading

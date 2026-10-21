@@ -15,11 +15,61 @@ use tracing::{info, warn};
 
 pub const SUPPORTED: &str = "postgres, mariadb, mysql, mongodb, cassandra, scylla, redis, sqlite";
 
+/// The database engines zesty-backup knows, from `[database] type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbKind {
+    Postgres,
+    MySql,
+    MariaDb,
+    MongoDb,
+    Cassandra,
+    Redis,
+    Sqlite,
+}
+
+impl DbKind {
+    pub fn from_config(db: &DatabaseConfig) -> Result<Self> {
+        let t = db
+            .db_type
+            .as_deref()
+            .unwrap_or("postgres")
+            .to_ascii_lowercase();
+        Ok(match t.as_str() {
+            "postgres" | "postgresql" => Self::Postgres,
+            "mysql" => Self::MySql,
+            "mariadb" => Self::MariaDb,
+            "mongodb" | "mongo" => Self::MongoDb,
+            "cassandra" | "scylla" => Self::Cassandra,
+            "redis" => Self::Redis,
+            "sqlite" | "sqlite3" => Self::Sqlite,
+            other => bail!(
+                "Unsupported database type: {}. Supported: {}",
+                other,
+                SUPPORTED
+            ),
+        })
+    }
+
+    /// Tools that can make the dump (any one of them is enough). Empty: none needed.
+    pub fn dump_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Postgres => &["pg_dump"],
+            Self::MySql => &["mysqldump"],
+            Self::MariaDb => &["mariadb-dump", "mysqldump"],
+            Self::MongoDb => &["mongodump"],
+            Self::Cassandra => &["cqlsh"],
+            Self::Redis => &["redis-cli"],
+            Self::Sqlite => &[],
+        }
+    }
+}
+
 pub fn backup_database(
     archive: &mut ArchiveWriter,
     db: &DatabaseConfig,
     project_path: &str,
 ) -> Result<()> {
+    DbKind::from_config(db)?;
     let db_type = db
         .db_type
         .as_deref()
@@ -233,6 +283,88 @@ fn backup_sqlite(archive: &mut ArchiveWriter, db_path: &str) -> Result<()> {
         warn!("sqlite3 not found; copying the database file directly (may be inconsistent if it is being written to)");
     }
     archive.add_path(path, &archive_path, &Default::default())
+}
+
+/// Check that a dump would work, without dumping any data: runs a schema-only dump with the
+/// configured settings (catches wrong passwords, unreachable hosts and pg_dump/server version
+/// mismatches). Returns a short description of what was checked.
+pub fn connection_test(db: &DatabaseConfig, project_path: &str) -> Result<String> {
+    let kind = DbKind::from_config(db)?;
+    let database = db
+        .database
+        .as_deref()
+        .context("database.database is not set")?;
+    if kind == DbKind::Sqlite {
+        let mut header = [0u8; 16];
+        File::open(database)
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut header))
+            .with_context(|| format!("Cannot read SQLite file {}", database))?;
+        anyhow::ensure!(
+            &header == b"SQLite format 3\0",
+            "{} is not an SQLite database",
+            database
+        );
+        return Ok(format!("{} is a readable SQLite database", database));
+    }
+    let tool = kind
+        .dump_tools()
+        .iter()
+        .find(|t| which::which(t).is_ok())
+        .with_context(|| format!("{} not found in PATH", kind.dump_tools().join(" or ")))?;
+    let host = db.host.as_deref().unwrap_or("localhost");
+    let password = resolve_password(db, project_path);
+    let mut cmd = Command::new(tool);
+    match kind {
+        DbKind::Postgres => {
+            cmd.args([
+                "--schema-only",
+                "--no-password",
+                "--host",
+                host,
+                "--dbname",
+                database,
+            ]);
+            if let Some(port) = db.port {
+                cmd.arg("--port").arg(port.to_string());
+            }
+            if let Some(user) = &db.username {
+                cmd.arg("--username").arg(user);
+            }
+            if let Some(pw) = &password {
+                cmd.env("PGPASSWORD", pw);
+            }
+        }
+        DbKind::MySql | DbKind::MariaDb => {
+            cmd.arg("--no-data").arg(format!("--host={}", host));
+            if let Some(port) = db.port {
+                cmd.arg(format!("--port={}", port));
+            }
+            if let Some(user) = &db.username {
+                cmd.arg(format!("--user={}", user));
+            }
+            if let Some(pw) = &password {
+                cmd.env("MYSQL_PWD", pw);
+            }
+            cmd.arg(database);
+        }
+        // No cheap dry run for these: finding the tool is all we check.
+        _ => return Ok(format!("{} found (connection not tested)", tool)),
+    }
+    let output = cmd
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("Failed to run {}", tool))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed: {}",
+            tool,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(format!(
+        "{} connected to {} on {} (schema-only test)",
+        tool, database, host
+    ))
 }
 
 /// Password from the config, then `DB_PASSWORD`, then `DATABASE_URL` in `<project>/.env`.
