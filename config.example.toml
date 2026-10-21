@@ -161,6 +161,19 @@ etc_dirs = [
 # work_dir = "/var/tmp"                     # needs room for one backup + its contents
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [alerts]: optional. Get told when something fails (and notice when backups
+# silently stop). Test with: zesty-backup test-alerts
+# ─────────────────────────────────────────────────────────────────────────────
+# [alerts]
+# healthchecks_url = "https://hc-ping.com/your-uuid"   # pinged on success, /fail on failure
+# healthchecks_drill_url = "https://hc-ping.com/other" # optional separate check for drills
+# ntfy_url = "https://ntfy.sh/my-secret-topic"          # push notifications
+# ntfy_token = "tk_..."                                 # for protected ntfy topics
+# webhook_url = "https://hooks.slack.com/services/..."  # Slack, Discord or any JSON endpoint
+# notify_success = false                                # true: also notify successes
+# server_name = "web-1"                                 # default: hostname
+
+# ─────────────────────────────────────────────────────────────────────────────
 # [logging]: optional
 # ─────────────────────────────────────────────────────────────────────────────
 [logging]

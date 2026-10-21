@@ -2,6 +2,7 @@
 //!
 //! The `zesty-backup` binary (src/main.rs) is a thin CLI over this library.
 
+pub mod alerts;
 pub mod archive;
 pub mod backup;
 pub mod config;

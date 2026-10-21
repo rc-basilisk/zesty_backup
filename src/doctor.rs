@@ -27,6 +27,16 @@ pub async fn run(config: &AppConfig, options: &DoctorOptions<'_>) -> Report {
     check_local(config, &mut report);
     check_encryption(config, options.identity, &mut report);
     check_dependencies(config, &mut report);
+    if crate::alerts::Alerter::new(config.alerts.as_ref()).is_configured() {
+        report.pass(
+            "Alerts",
+            "configured (check delivery with `zesty-backup test-alerts`)",
+        );
+    } else {
+        report
+            .warn("Alerts", "none configured: failures will go unnoticed")
+            .hint("add an [alerts] section (healthchecks.io, ntfy or a webhook)");
+    }
     if options.skip_storage {
         report.skip("Storage", "skipped (--skip-storage)");
     } else {

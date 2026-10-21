@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The result is saved and shown by `status`.
 - `[drill] interval_hours` lets the daemon run drills on a schedule.
+- **Alerts** (`[alerts]`):
+  - healthchecks.io-style dead-man's switch: pings on success, `/fail` on
+    failure; drills can use a separate check;
+  - ntfy push notifications;
+  - webhooks, formatted for Slack and Discord, JSON for anything else.
+
+  Failures only by default (`notify_success` for everything). Works from the
+  daemon and from cron. `zesty-backup test-alerts` checks the channels.
 
 ## [2.0.0] - 2026-10-13
 

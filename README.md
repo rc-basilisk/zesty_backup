@@ -27,6 +27,7 @@ It ships as one binary. You can run each step by hand or leave it running as a d
 - [Encryption](#encryption)
 - [Checking your setup: doctor](#checking-your-setup-doctor)
 - [Restore drills: proving backups work](#restore-drills-proving-backups-work)
+- [Alerts](#alerts)
 - [Restoring a backup](#restoring-a-backup)
 - [Docker](#docker)
 - [Security](#security)
@@ -94,6 +95,7 @@ elsewhere.
 | `restore <file>` | Extract an archive (`--target <dir>`, default `./restored`). |
 | `verify <file>` | Check that an archive is complete and not corrupted. |
 | `doctor` | Check the setup: paths, encryption keys, database access, and an upload/list/download/delete test on the storage. |
+| `test-alerts` | Send a test message to every channel in `[alerts]`. |
 | `drill` | Restore the newest remote backup into a temporary folder and check it (files, database, your own commands). |
 | `clean` | Delete backups older than `retention_days`, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
 | `daemon` | Keep running: back up, upload and clean on a schedule. |
@@ -573,6 +575,40 @@ Notes:
   contents. Point `work_dir` at a big disk if `/tmp` is small.
 - **Exit code** is 1 when a check fails, so cron/systemd can alert on it.
 
+## Alerts
+
+A backup system that fails silently is worse than none. `[alerts]` sends
+results to up to three kinds of channel:
+
+```toml
+[alerts]
+healthchecks_url = "https://hc-ping.com/your-uuid"   # dead-man's switch (see below)
+ntfy_url = "https://ntfy.sh/my-secret-topic"          # push notifications to your phone
+webhook_url = "https://hooks.slack.com/services/..."  # Slack, Discord, or any JSON endpoint
+# notify_success = true     # also send ntfy/webhook messages when things go well
+# server_name = "web-1"     # name used in messages (default: the hostname)
+```
+
+- **[healthchecks.io](https://healthchecks.io)** (free tier, or self-hosted):
+  every successful backup, upload and clean pings the check, and every failure
+  pings `/fail`. Set the check's period to slightly more than your backup
+  interval. If the pings stop because the server is down, the disk is full or
+  the daemon crashed, *healthchecks.io* alerts you. That's the one failure Zesty
+  can't report itself. Put drills on their own check with
+  `healthchecks_drill_url`; otherwise only drill *failures* are reported to the
+  main check.
+- **[ntfy](https://ntfy.sh)**: push notifications on your phone, high priority
+  on failures. Use a hard-to-guess topic name, or `ntfy_token` for a protected
+  or self-hosted server.
+- **Webhook:** Slack and Discord incoming-webhook URLs get a formatted message.
+  Any other URL gets a JSON POST with `event`, `success`, `server`, `summary`
+  and `details`.
+
+By default, ntfy and the webhook only hear about failures. This works the same
+from the daemon and from cron (`backup`, `upload`, `clean` and `drill` each
+report). Run `zesty-backup test-alerts` to check the setup. A failed alert is
+logged but never stops a backup.
+
 ## Restoring a backup
 
 ```bash
@@ -634,6 +670,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 | OAuth provider: 401 / `invalid_grant` | The access token expired, or the refresh token was revoked or used twice (Box). Get a new refresh token. |
 | pCloud: `Log in failed` / code 2000 | Wrong token, or wrong `region` (EU accounts need `region = "eu"`). |
 | `This backup is encrypted` | Pass `--identity <key file>`, or set `ZESTY_BACKUP_PASSPHRASE` for passphrase-encrypted backups. |
+| No alerts arrive | Run `zesty-backup test-alerts`: it shows each channel's error. |
 | Drill: `docker run … failed` | Is Docker running, and may this user use it? "rate limit" means Docker Hub throttled the image download: retry later or `docker login`. |
 | Drill: database restore has errors | A missing extension or role, or an image older than your server. Set `drill.database_image`. |
 | `zesty-backup logs` says no log file | Set `log_dir` in `[logging]`. Under systemd, use `journalctl -u zesty-backup`. |
@@ -654,6 +691,7 @@ Code layout:
 - `src/backup.rs`: create, upload, list, download and clean
 - `src/archive.rs`: tar.zst writing, extraction and exclude patterns
 - `src/encryption.rs`: optional age encryption
+- `src/alerts.rs`: healthchecks/ntfy/webhook notifications
 - `src/doctor.rs`, `src/drill.rs`: setup checks and restore drills (shared report format in `src/report.rs`)
 - `src/database.rs`: database dumps
 - `src/providers/`: one file per storage backend

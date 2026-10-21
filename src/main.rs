@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{error, info, warn};
+use zesty_backup::alerts::{Alerter, Event, EventKind};
 use zesty_backup::archive;
 use zesty_backup::backup::{self, human_size, REMOTE_PREFIX};
 use zesty_backup::config::{AppConfig, StorageConfig, EXAMPLE_CONFIG};
@@ -137,6 +138,8 @@ enum Commands {
         #[arg(long)]
         keep: bool,
     },
+    /// Send a test message to every channel in [alerts]
+    TestAlerts,
     /// Show configuration and backup counts
     Status,
     /// Show the last lines of the log file (needs [logging] log_dir)
@@ -264,14 +267,32 @@ async fn run(cli: Cli, config: Result<AppConfig>) -> Result<()> {
 }
 
 async fn run_with_config(command: Commands, config: AppConfig, config_path: &str) -> Result<()> {
+    let alerter = Alerter::new(config.alerts.as_ref());
     match command {
         Commands::Backup { full } => {
-            tokio::task::spawn_blocking(move || backup::create_backup(&config, full)).await??;
+            let result = tokio::task::spawn_blocking(move || backup::create_backup(&config, full))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r);
+            alerter
+                .notify(&Event::from_result(EventKind::Backup, &result, |p| {
+                    describe_archive(p)
+                }))
+                .await;
+            result?;
         }
         Commands::Upload { file } => {
-            let provider = providers::from_config(&config.storage).await?;
-            let n = backup::upload(provider.as_ref(), &config, file.as_deref()).await?;
-            info!("{} backup(s) uploaded", n);
+            let result = async {
+                let provider = providers::from_config(&config.storage).await?;
+                backup::upload(provider.as_ref(), &config, file.as_deref()).await
+            }
+            .await;
+            alerter
+                .notify(&Event::from_result(EventKind::Upload, &result, |n| {
+                    format!("{} backup(s) uploaded", n)
+                }))
+                .await;
+            info!("{} backup(s) uploaded", result?);
         }
         Commands::List { remote } => {
             if remote {
@@ -300,12 +321,23 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
             dry_run,
             local_only,
         } => {
-            let provider = if local_only {
-                None
-            } else {
-                Some(providers::from_config(&config.storage).await?)
-            };
-            backup::clean(provider.as_deref(), &config, dry_run).await?;
+            let result = async {
+                let provider = if local_only {
+                    None
+                } else {
+                    Some(providers::from_config(&config.storage).await?)
+                };
+                backup::clean(provider.as_deref(), &config, dry_run).await
+            }
+            .await;
+            if !dry_run {
+                alerter
+                    .notify(&Event::from_result(EventKind::Clean, &result, |_| {
+                        "old backups cleaned".to_string()
+                    }))
+                    .await;
+            }
+            result?;
         }
         Commands::Daemon {
             backup_interval,
@@ -345,6 +377,12 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
                 keep,
             };
             let outcome = drill::run(&config, provider.as_deref(), &options).await;
+            alerter
+                .notify(&Event::from_drill(
+                    outcome.backup.as_deref(),
+                    &outcome.report,
+                ))
+                .await;
             println!(
                 "Restore drill: {}",
                 outcome.backup.as_deref().unwrap_or("(no backup)")
@@ -354,6 +392,30 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
                 println!("Restored files kept in {}", dir.display());
             }
             if !outcome.report.passed() {
+                std::process::exit(1);
+            }
+        }
+        Commands::TestAlerts => {
+            if !alerter.is_configured() {
+                bail!("No alert channels configured: add an [alerts] section (see README)");
+            }
+            let event = Event {
+                kind: EventKind::Test,
+                success: true,
+                summary: "Test message from `zesty-backup test-alerts`. If you can read this, alerts work.".into(),
+                details: None,
+            };
+            let mut failed = false;
+            for delivery in alerter.send(&event).await {
+                match delivery.result {
+                    Ok(()) => println!("  ✔ {}", delivery.channel),
+                    Err(e) => {
+                        failed = true;
+                        println!("  ✖ {}: {:#}", delivery.channel, e);
+                    }
+                }
+            }
+            if failed {
                 std::process::exit(1);
             }
         }
@@ -500,7 +562,14 @@ async fn run_daemon(
             .with_context(|| format!("Failed to write PID file {}", pid_file.display()))?;
     }
 
-    let provider = providers::from_config(&config.storage).await?;
+    let alerter = Alerter::new(config.alerts.as_ref());
+    let provider = match providers::from_config(&config.storage).await {
+        Ok(p) => p,
+        Err(e) => {
+            alerter.notify(&Event::failure(EventKind::Upload, &e)).await;
+            return Err(e);
+        }
+    };
     let config = std::sync::Arc::new(config);
     info!(
         "Daemon started (PID {}): backup every {}h, upload + clean every {}h",
@@ -530,16 +599,16 @@ async fn run_daemon(
 
     // Both timers fire immediately: start with a backup, then upload it.
     backup_timer.tick().await;
-    run_backup(&config).await;
+    run_backup(&config, &alerter).await;
     upload_timer.tick().await;
-    run_upload(provider.as_ref(), &config).await;
+    run_upload(provider.as_ref(), &config, &alerter).await;
 
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
-            _ = backup_timer.tick() => run_backup(&config).await,
-            _ = upload_timer.tick() => run_upload(provider.as_ref(), &config).await,
-            _ = drill_timer.tick(), if drill_hours.is_some() => run_drill(provider.as_ref(), &config).await,
+            _ = backup_timer.tick() => run_backup(&config, &alerter).await,
+            _ = upload_timer.tick() => run_upload(provider.as_ref(), &config, &alerter).await,
+            _ = drill_timer.tick(), if drill_hours.is_some() => run_drill(provider.as_ref(), &config, &alerter).await,
         }
     }
 
@@ -550,18 +619,40 @@ async fn run_daemon(
     Ok(())
 }
 
-async fn run_backup(config: &std::sync::Arc<AppConfig>) {
+async fn run_backup(config: &std::sync::Arc<AppConfig>, alerter: &Alerter) {
     let config = config.clone();
-    match tokio::task::spawn_blocking(move || backup::create_backup(&config, false)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => error!("Scheduled backup failed: {:#}", e),
-        Err(e) => error!("Scheduled backup panicked: {}", e),
+    let result = tokio::task::spawn_blocking(move || backup::create_backup(&config, false))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    if let Err(e) = &result {
+        error!("Scheduled backup failed: {:#}", e);
     }
+    alerter
+        .notify(&Event::from_result(EventKind::Backup, &result, |p| {
+            describe_archive(p)
+        }))
+        .await;
 }
 
-async fn run_drill(provider: &dyn StorageProvider, config: &AppConfig) {
+fn describe_archive(path: &Path) -> String {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    format!(
+        "{} created ({})",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        human_size(size)
+    )
+}
+
+async fn run_drill(provider: &dyn StorageProvider, config: &AppConfig, alerter: &Alerter) {
     info!("Scheduled restore drill starting");
     let outcome = drill::run(config, Some(provider), &drill::DrillOptions::default()).await;
+    alerter
+        .notify(&Event::from_drill(
+            outcome.backup.as_deref(),
+            &outcome.report,
+        ))
+        .await;
     let backup = outcome.backup.as_deref().unwrap_or("(no backup)");
     if outcome.report.passed() {
         info!("Restore drill of {}: {}", backup, outcome.report.summary());
@@ -575,8 +666,14 @@ async fn run_drill(provider: &dyn StorageProvider, config: &AppConfig) {
     }
 }
 
-async fn run_upload(provider: &dyn StorageProvider, config: &AppConfig) {
-    match backup::upload(provider, config, None).await {
+async fn run_upload(provider: &dyn StorageProvider, config: &AppConfig, alerter: &Alerter) {
+    let result = backup::upload(provider, config, None).await;
+    alerter
+        .notify(&Event::from_result(EventKind::Upload, &result, |n| {
+            format!("{} backup(s) uploaded", n)
+        }))
+        .await;
+    match result {
         Ok(n) => info!("Scheduled upload finished: {} backup(s) uploaded", n),
         Err(e) => {
             error!("Scheduled upload failed: {:#}", e);
@@ -584,8 +681,10 @@ async fn run_upload(provider: &dyn StorageProvider, config: &AppConfig) {
             return;
         }
     }
-    if let Err(e) = backup::clean(Some(provider), config, false).await {
+    let result = backup::clean(Some(provider), config, false).await;
+    if let Err(e) = &result {
         error!("Cleaning old backups failed: {:#}", e);
+        alerter.notify(&Event::failure(EventKind::Clean, e)).await;
     }
 }
 

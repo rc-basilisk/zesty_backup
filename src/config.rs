@@ -17,6 +17,7 @@ pub struct AppConfig {
     pub logging: Option<LoggingConfig>,
     pub encryption: Option<EncryptionConfig>,
     pub drill: Option<DrillConfig>,
+    pub alerts: Option<AlertsConfig>,
 }
 
 impl AppConfig {
@@ -52,6 +53,25 @@ impl AppConfig {
                 globset::Glob::new(pattern).map_err(|e| {
                     anyhow::anyhow!("drill.files: invalid pattern {:?}: {}", pattern, e)
                 })?;
+            }
+        }
+        if let Some(alerts) = &self.alerts {
+            for (name, url) in [
+                ("healthchecks_url", &alerts.healthchecks_url),
+                ("healthchecks_drill_url", &alerts.healthchecks_drill_url),
+                ("ntfy_url", &alerts.ntfy_url),
+                ("webhook_url", &alerts.webhook_url),
+            ] {
+                if let Some(url) = url {
+                    let parsed = url::Url::parse(url).map_err(|e| {
+                        anyhow::anyhow!("alerts.{}: invalid URL {:?}: {}", name, url, e)
+                    })?;
+                    anyhow::ensure!(
+                        matches!(parsed.scheme(), "http" | "https"),
+                        "alerts.{} must be an http(s) URL",
+                        name
+                    );
+                }
             }
         }
         if let Some(h) = self.backup.upload_interval_hours {
@@ -191,6 +211,25 @@ pub struct EncryptionConfig {
     pub passphrase: Option<String>,
     /// Private key file used by `restore`/`verify` (not needed for creating backups).
     pub identity_file: Option<String>,
+}
+
+/// Where to report successes and failures (see `alerts.rs`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertsConfig {
+    /// healthchecks.io (or self-hosted) ping URL: pinged on every success, `/fail` on failures.
+    pub healthchecks_url: Option<String>,
+    /// Separate check for restore drills (default: drill failures go to healthchecks_url).
+    pub healthchecks_drill_url: Option<String>,
+    /// ntfy topic URL, e.g. https://ntfy.sh/my-secret-topic
+    pub ntfy_url: Option<String>,
+    pub ntfy_token: Option<String>,
+    /// Slack/Discord incoming webhook, or any URL accepting a JSON POST.
+    pub webhook_url: Option<String>,
+    /// Also send ntfy/webhook messages for successes (default: failures only).
+    pub notify_success: Option<bool>,
+    /// Name used in messages (default: the hostname).
+    pub server_name: Option<String>,
 }
 
 /// Restore drills (`zesty-backup drill`): restore the latest backup somewhere temporary
