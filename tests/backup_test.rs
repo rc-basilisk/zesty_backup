@@ -132,8 +132,10 @@ async fn upload_list_download_clean() {
     let local = backup::local_backups(&backup_dir).unwrap();
     assert_eq!(local, vec![current.clone()]);
     assert!(backup_dir.join("unrelated.txt").exists());
-    // Remote files were all just written, so they are within the retention period.
-    assert_eq!(backup::remote_backups(&remote).await.unwrap().len(), 3);
+    // Remote copies are dated by their name too (not by upload time): the 2020 ones go.
+    let remote_left = backup::remote_backups(&remote).await.unwrap();
+    assert_eq!(remote_left.len(), 1);
+    assert!(remote_left[0].key.ends_with(&current_name));
 }
 
 #[tokio::test]
@@ -261,4 +263,52 @@ fn encryption_config_errors() {
         config_with_encryption(&fx, "[encryption]\nenabled = false\nrecipients = [\"x\"]");
     let path = backup::create_backup(&disabled, false).unwrap();
     assert!(path.to_string_lossy().ends_with(".tar.zst"));
+}
+
+#[tokio::test]
+async fn gfs_retention_keeps_daily_weekly_monthly() {
+    use chrono::{Datelike, Duration, Local};
+    let fx = Fixture::new();
+    let mut config = fx.config;
+    config.retention = Some(zesty_backup::config::RetentionConfig {
+        keep_daily: Some(7),
+        keep_weekly: Some(4),
+        keep_monthly: Some(6),
+        ..Default::default()
+    });
+    let dir = PathBuf::from(&config.backup.local_backup_dir);
+    fs::create_dir_all(&dir).unwrap();
+    // One backup a day for a year, the newest made today.
+    let today = Local::now();
+    for days_ago in 0..365 {
+        let t = today - Duration::days(days_ago);
+        let name = format!("backup-incr-{}.tar.zst", t.format("%Y%m%d-%H%M%S"));
+        fs::write(dir.join(name), "x").unwrap();
+    }
+
+    backup::clean(None, &config, true).await.unwrap();
+    assert_eq!(
+        backup::local_backups(&dir).unwrap().len(),
+        365,
+        "dry run deletes nothing"
+    );
+
+    backup::clean(None, &config, false).await.unwrap();
+    let left = backup::local_backups(&dir).unwrap();
+    // 7 daily + up to 4 weekly + up to 6 monthly, minus overlaps.
+    assert!((10..=17).contains(&left.len()), "{} left", left.len());
+    let newest = left
+        .last()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(newest.contains(&today.format("%Y%m%d").to_string()));
+    // The oldest kept backup is about 6 months old: one per month was kept.
+    let oldest =
+        backup::timestamp_from_name(&left[0].file_name().unwrap().to_string_lossy()).unwrap();
+    let months = (today.year() - oldest.year()) * 12 + today.month() as i32
+        - oldest.with_timezone(&Local).month() as i32;
+    assert_eq!(months, 5, "oldest kept: {}", oldest);
 }

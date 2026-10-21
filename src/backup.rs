@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Remote "directory" all backups are uploaded to.
 pub const REMOTE_PREFIX: &str = "backups/";
@@ -458,32 +458,39 @@ pub async fn clean_with(
             return Ok(());
         }
     }
-    let retention = config.backup.retention_days();
-    let cutoff = Utc::now() - chrono::Duration::days(retention as i64);
+    let policy = crate::retention::Policy::from_config(config);
     info!(
-        "Removing backups older than {} days{}",
-        retention,
+        "Retention: {}{}",
+        policy.describe(),
         if dry_run { " (dry run)" } else { "" }
     );
+    let now = Utc::now();
 
+    // Backups are dated by the time in their name (when they were created), which also
+    // works when several were uploaded at once.
     let local = local_backups(Path::new(&config.backup.local_backup_dir))?;
-    let keep_local = local.len().saturating_sub(1);
-    for path in local.iter().take(keep_local) {
-        let name = path.file_name().unwrap().to_string_lossy();
-        let created = timestamp_from_name(&name).or_else(|| {
-            fs::metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .map(DateTime::<Utc>::from)
-        });
-        if created.is_some_and(|c| c < cutoff) {
-            if dry_run {
-                info!("Would delete local {}", path.display());
-            } else {
-                fs::remove_file(path)
-                    .with_context(|| format!("Failed to delete {}", path.display()))?;
-                info!("Deleted local {}", path.display());
-            }
+    let times: Vec<Option<DateTime<Utc>>> = local
+        .iter()
+        .map(|path| {
+            timestamp_from_name(&path.file_name().unwrap().to_string_lossy()).or_else(|| {
+                fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(DateTime::<Utc>::from)
+            })
+        })
+        .collect();
+    let decisions = crate::retention::decide(&times, &policy, now);
+    info!("Local: {}", crate::retention::summarize(&decisions));
+    for (path, reasons) in local.iter().zip(&decisions) {
+        if !reasons.is_empty() {
+            debug!("Keeping local {} ({})", path.display(), reasons.join(", "));
+        } else if dry_run {
+            info!("Would delete local {}", path.display());
+        } else {
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to delete {}", path.display()))?;
+            info!("Deleted local {}", path.display());
         }
     }
 
@@ -491,18 +498,20 @@ pub async fn clean_with(
         return Ok(());
     };
     let remote = remote_backups(provider).await?;
-    let keep_remote = remote.len().saturating_sub(1);
-    for item in remote.iter().take(keep_remote) {
-        let created = item
-            .last_modified
-            .or_else(|| timestamp_from_name(&item.key[REMOTE_PREFIX.len()..]));
-        if created.is_some_and(|c| c < cutoff) {
-            if dry_run {
-                info!("Would delete remote {}", item.key);
-            } else {
-                provider.delete(&item.key).await?;
-                info!("Deleted remote {}", item.key);
-            }
+    let times: Vec<Option<DateTime<Utc>>> = remote
+        .iter()
+        .map(|item| timestamp_from_name(&item.key[REMOTE_PREFIX.len()..]).or(item.last_modified))
+        .collect();
+    let decisions = crate::retention::decide(&times, &policy, now);
+    info!("Remote: {}", crate::retention::summarize(&decisions));
+    for (item, reasons) in remote.iter().zip(&decisions) {
+        if !reasons.is_empty() {
+            debug!("Keeping remote {} ({})", item.key, reasons.join(", "));
+        } else if dry_run {
+            info!("Would delete remote {}", item.key);
+        } else {
+            provider.delete(&item.key).await?;
+            info!("Deleted remote {}", item.key);
         }
     }
     Ok(())

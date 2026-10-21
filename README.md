@@ -99,7 +99,7 @@ elsewhere.
 | `accept-changes` | After an anomaly warning you expected (e.g. you deleted a lot of files): make the newest backup the new normal. |
 | `test-alerts` | Send a test message to every channel in `[alerts]`. |
 | `drill` | Restore the newest remote backup into a temporary folder and check it (files, database, your own commands). |
-| `clean` | Delete backups older than `retention_days`, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
+| `clean` | Delete backups the [retention policy](#retention) doesn't keep, locally and remotely. Add `--dry-run` to preview, or `--local-only` to skip remote. |
 | `daemon` | Keep running: back up, upload and clean on a schedule. |
 | `client …` | Use remote backups without a config file (e.g. from your laptop). |
 | `status` | Show the configuration and local/remote backup counts. |
@@ -154,6 +154,43 @@ compression_level = 3
 - **A pattern with `/`** matches a path relative to the folder being backed up
   (`storage/cache/*`), or an absolute path (`/var/www/myapp/tmp`).
 - `local_backup_dir` is always excluded, even when it sits inside `project_path`.
+
+### Retention
+
+`clean` (and the daemon, after each upload) deletes old backups. There are two
+ways to say which ones to keep.
+
+**Simple:** keep everything from the last N days.
+
+```toml
+[backup]
+retention_days = 14
+```
+
+**Daily/weekly/monthly/yearly:** keep the newest backup of each of the last N
+days, weeks, months and years. You get recent fine-grained backups plus long
+history, for a fraction of the storage:
+
+```toml
+[retention]
+keep_daily = 7        # one per day for the last 7 days
+keep_weekly = 4       # one per week for the last 4 weeks
+keep_monthly = 12     # one per month for the last 12 months
+keep_yearly = 3       # one per year for the last 3 years
+# keep_last = 3       # always keep the 3 newest (default 1)
+# keep_within_days = 2  # plus everything from the last 2 days
+```
+
+When `[retention]` is set, it replaces `retention_days`. In both modes:
+
+- the newest backup is always kept;
+- backups are dated by the time in their name (when they were created, not
+  when they were uploaded);
+- nothing is deleted while an [anomaly](#anomaly-checks) is flagged.
+
+`clean --dry-run` shows the decision before anything is deleted, e.g.
+`Local: 20 kept, 381 to delete (1 last, 7 daily, 4 weekly, 12 monthly, 2 yearly)`.
+Add `RUST_LOG=zesty_backup=debug` to see why each backup is kept.
 
 ### Databases
 

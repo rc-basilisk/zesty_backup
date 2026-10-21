@@ -58,6 +58,7 @@ exclude = [
 
 # Delete backups older than this many days (local and remote) when running
 # `zesty-backup clean` or the daemon. The newest backup is always kept.
+# For daily/weekly/monthly/yearly retention instead, see [retention] below.
 retention_days = 7
 
 # zstd compression level, 1 (fastest) to 22 (smallest). 3 is a good default.
@@ -159,6 +160,19 @@ etc_dirs = [
 # database_image = "postgres:16-alpine"     # default: picked from the dump's server version
 # container_runtime = "docker"              # or "podman"
 # work_dir = "/var/tmp"                     # needs room for one backup + its contents
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [retention]: optional. Keep the newest backup of each of the last N days,
+# weeks, months and years instead of "everything from the last N days".
+# When present, it replaces [backup] retention_days.
+# ─────────────────────────────────────────────────────────────────────────────
+# [retention]
+# keep_daily = 7
+# keep_weekly = 4
+# keep_monthly = 12
+# keep_yearly = 3
+# keep_last = 1              # always keep the N newest
+# keep_within_days = 2       # plus everything from the last N days
 
 # ─────────────────────────────────────────────────────────────────────────────
 # [anomaly]: optional, ON by default. Each new backup is compared with the

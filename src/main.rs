@@ -732,8 +732,8 @@ async fn show_status(config: &AppConfig, config_path: &str) {
     println!("  Project path:      {}", config.backup.project_path);
     println!("  Backup directory:  {}", config.backup.local_backup_dir);
     println!(
-        "  Retention:         {} days",
-        config.backup.retention_days()
+        "  Retention:         {}",
+        zesty_backup::retention::Policy::from_config(config).describe()
     );
 
     let local =

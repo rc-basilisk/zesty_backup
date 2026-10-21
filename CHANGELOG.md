@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A flagged backup sends an alert and pauses retention, so good old backups
   aren't rotated out. `zesty-backup accept-changes` accepts an expected
   change; `clean --force` overrides the pause.
+- **Daily/weekly/monthly/yearly retention** (`[retention]`: `keep_daily`,
+  `keep_weekly`, `keep_monthly`, `keep_yearly`, `keep_last`,
+  `keep_within_days`). `clean` now prints how many backups each rule keeps.
+
+### Changed
+- Retention dates remote backups by the creation time in their name, like
+  local ones. Before, remote copies were aged by upload time, so a backup
+  uploaded late was kept longer than intended.
 
 ## [2.0.0] - 2026-10-13
 

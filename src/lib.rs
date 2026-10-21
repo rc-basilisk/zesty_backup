@@ -13,3 +13,4 @@ pub mod drill;
 pub mod encryption;
 pub mod providers;
 pub mod report;
+pub mod retention;

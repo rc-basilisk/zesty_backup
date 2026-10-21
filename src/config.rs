@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub drill: Option<DrillConfig>,
     pub alerts: Option<AlertsConfig>,
     pub anomaly: Option<AnomalyConfig>,
+    pub retention: Option<RetentionConfig>,
 }
 
 impl AppConfig {
@@ -55,6 +56,22 @@ impl AppConfig {
                     anyhow::anyhow!("drill.files: invalid pattern {:?}: {}", pattern, e)
                 })?;
             }
+        }
+        if let Some(r) = &self.retention {
+            let any = r.keep_within_days.is_some()
+                || [
+                    r.keep_last,
+                    r.keep_daily,
+                    r.keep_weekly,
+                    r.keep_monthly,
+                    r.keep_yearly,
+                ]
+                .iter()
+                .any(|v| v.is_some_and(|n| n > 0));
+            anyhow::ensure!(
+                any,
+                "[retention] needs at least one rule (keep_daily, keep_weekly, keep_monthly, keep_yearly, keep_last or keep_within_days)"
+            );
         }
         if let Some(a) = &self.anomaly {
             for (name, v) in [
@@ -230,6 +247,22 @@ pub struct EncryptionConfig {
     pub passphrase: Option<String>,
     /// Private key file used by `restore`/`verify` (not needed for creating backups).
     pub identity_file: Option<String>,
+}
+
+/// Which backups `clean` keeps (see `retention.rs`). When present, it replaces
+/// `[backup] retention_days`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Always keep this many of the newest backups (default 1).
+    pub keep_last: Option<usize>,
+    /// Keep everything from the last N days.
+    pub keep_within_days: Option<u32>,
+    /// Keep the newest backup of each of the last N days / weeks / months / years.
+    pub keep_daily: Option<usize>,
+    pub keep_weekly: Option<usize>,
+    pub keep_monthly: Option<usize>,
+    pub keep_yearly: Option<usize>,
 }
 
 /// Anomaly checks on each new backup (see `anomaly.rs`). On by default.
