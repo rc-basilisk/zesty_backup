@@ -1,16 +1,22 @@
 name: Release
 
-# Push a tag like v2.0.0 to build the binaries and publish a GitHub release.
+# Push a tag like v2.0.0 to build the binaries and publish a GitHub release,
+# or run it manually ("Run workflow") with the tag to create.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v2.0.0"
+        required: true
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build-release:
@@ -62,26 +68,36 @@ jobs:
         run: |
           mkdir -p release
           cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} release/
-          tar czf zesty-backup-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_format }} -C release ${{ matrix.bin_name }}
+          tar czf zesty-backup-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_format }} -C release ${{ matrix.bin_name }}
       
       - name: Create archive (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           mkdir release
           copy target\${{ matrix.target }}\release\${{ matrix.bin_name }} release\
-          powershell Compress-Archive -Path release\${{ matrix.bin_name }} -DestinationPath zesty-backup-${{ github.ref_name }}-${{ matrix.target }}.zip -Force
+          powershell Compress-Archive -Path release\${{ matrix.bin_name }} -DestinationPath zesty-backup-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip -Force
       
       - name: Upload release asset
         uses: actions/upload-artifact@v4
         with:
           name: zesty-backup-${{ matrix.target }}
-          path: zesty-backup-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_format }}
-      
-      - name: Upload to release
+          path: zesty-backup-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_format }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: zesty-backup-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_format }}
+          files: dist/*
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
