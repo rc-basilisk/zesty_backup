@@ -1,9 +1,13 @@
 name: Release
 
-# Push a tag like v2.0.0 to build the binaries and publish a GitHub release,
-# or run it manually ("Run workflow") with the tag to create.
+# Publishes a GitHub release with prebuilt binaries:
+#  - automatically on pushes to main, when the tag v<version> (version from
+#    Cargo.toml) does not exist yet: bump the version to release, or
+#  - when a tag like v2.0.0 is pushed, or
+#  - manually ("Run workflow"), with the tag to create.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -16,12 +20,42 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  check:
+    name: Decide release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            tag="v$version"
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "$tag already released, nothing to do"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "Releasing $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
   build-release:
     name: Build Release Binaries
+    needs: check
+    if: needs.check.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ needs.check.outputs.tag }}
     strategy:
       matrix:
         include:
@@ -85,8 +119,10 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build-release
+    needs: [check, build-release]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.check.outputs.tag }}
     steps:
       - name: Download all binaries
         uses: actions/download-artifact@v4
