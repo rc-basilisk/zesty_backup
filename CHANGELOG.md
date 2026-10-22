@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] - 2026-10-22
 
 ### Added
 - **`zesty-backup doctor`** checks the whole setup without making a backup:
@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retention dates remote backups by the creation time in their name, like
   local ones. Before, remote copies were aged by upload time, so a backup
   uploaded late was kept longer than intended.
+- S3 connection errors are short and readable ("could not reach the S3
+  endpoint: Connection refused") instead of an internal debug dump.
+- `tempfile` 3.20 or newer is required.
 
 ## [2.0.0] - 2026-10-13
 
