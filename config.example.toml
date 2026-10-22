@@ -160,6 +160,8 @@ etc_dirs = [
 # database_image = "postgres:16-alpine"     # default: picked from the dump's server version
 # container_runtime = "docker"              # or "podman"
 # work_dir = "/var/tmp"                     # needs room for one backup + its contents
+# step_timeout_minutes = 60                 # stop any single step that takes longer
+# allow_restore_errors = false              # true: errors loading the dump are only warnings
 
 # ─────────────────────────────────────────────────────────────────────────────
 # [retention]: optional. Keep the newest backup of each of the last N days,

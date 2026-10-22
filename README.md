@@ -608,11 +608,21 @@ Notes:
   encryption the server doesn't have it, which is the point, so run drills
   from another machine, e.g. your laptop or a second server. That machine
   needs a copy of the config, `identity_file` (or `--identity`), and a cron
-  entry. Without a key, the drill tells you it couldn't look inside the backup
+  entry. Without a key, the drill **fails** with "contents NOT checked"
   instead of pretending it passed.
+- **Isolation and cleanup:** the database container has no network access
+  (nothing else on the host can reach the restored data). It is removed after
+  the drill, also on Ctrl-C/SIGTERM. Leftovers from a drill that was killed
+  outright are removed by the next drill.
+- **Strictness:** errors while loading the dump fail the drill. If some are
+  expected (e.g. an extension the image lacks), set `allow_restore_errors = true`
+  to make them warnings. Every step (image download, restore, each query and
+  command) is stopped after `step_timeout_minutes` (default 60).
 - **Disk space:** the drill needs room for the backup and its extracted
   contents. Point `work_dir` at a big disk if `/tmp` is small.
 - **Exit code** is 1 when a check fails, so cron/systemd can alert on it.
+- **In the daemon,** drills run alongside the backup schedule without blocking
+  it. A drill still running when the next one is due is not doubled up.
 
 ## Alerts
 
@@ -629,8 +639,10 @@ webhook_url = "https://hooks.slack.com/services/..."  # Slack, Discord, or any J
 ```
 
 - **[healthchecks.io](https://healthchecks.io)** (free tier, or self-hosted):
-  every successful backup, upload and clean pings the check, and every failure
-  pings `/fail`. Set the check's period to slightly more than your backup
+  every newly created backup pings the check, and every failure (backup,
+  upload, clean, anomaly) pings `/fail`. Uploads and cleans don't count as
+  "alive" on their own, so a broken backup job can't hide behind a working
+  upload job. Set the check's period to slightly more than your backup
   interval. If the pings stop because the server is down, the disk is full or
   the daemon crashed, *healthchecks.io* alerts you. That's the one failure Zesty
   can't report itself. Put drills on their own check with
@@ -668,8 +680,10 @@ When that happens:
 
 1. A warning is logged and an alert is sent (healthchecks `/fail`, ntfy,
    webhook).
-2. **Retention pauses**: `clean` (and the daemon) won't delete any backup
-   while the newest one looks wrong. `status` and `doctor` show it.
+2. **Retention pauses** until you look at it: `clean` (and the daemon) won't
+   delete any backup. `status` and `doctor` show it. The pause doesn't lift on
+   its own: flagged backups never count as "normal", so even weeks of
+   encrypted-by-ransomware backups can't become the new baseline.
 3. If the change was expected, run `zesty-backup accept-changes`. The newest
    backup becomes the new normal and retention resumes. `clean --force` also
    overrides the pause.

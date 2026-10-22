@@ -324,6 +324,10 @@ pub struct DrillConfig {
     pub work_dir: Option<String>,
     /// When set, `daemon` runs a drill this often.
     pub interval_hours: Option<u64>,
+    /// Kill any single step (image download, restore, query, command) after this long (default 60).
+    pub step_timeout_minutes: Option<u64>,
+    /// Treat errors while loading the database dump as warnings instead of failures.
+    pub allow_restore_errors: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

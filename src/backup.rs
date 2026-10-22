@@ -156,18 +156,12 @@ pub fn create_backup_checked(config: &AppConfig, full: bool) -> Result<BackupOut
     }
 
     let stats = crate::anomaly::BackupStats::new(&name, content, size);
-    let anomalies = match crate::anomaly::record(config, stats.clone()) {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("Could not update the backup history: {:#}", e);
-            Vec::new()
-        }
-    };
+    let anomalies = crate::anomaly::record(config, stats.clone());
     for a in &anomalies {
         warn!("Anomaly: {}", a);
     }
     if !anomalies.is_empty() {
-        warn!("Old backups will be kept until a normal backup is made (or run `zesty-backup accept-changes`)");
+        warn!("No backup will be deleted until you run `zesty-backup accept-changes` (or `clean --force`)");
     }
     Ok(BackupOutcome {
         path,
@@ -439,7 +433,18 @@ pub async fn clean(
     config: &AppConfig,
     dry_run: bool,
 ) -> Result<()> {
-    clean_with(provider, config, dry_run, false).await
+    clean_with(provider, config, dry_run, false)
+        .await
+        .map(|_| ())
+}
+
+/// What `clean` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CleanSummary {
+    /// Nothing was deleted because an anomaly paused retention.
+    pub paused: bool,
+    /// Backups deleted (or that would be, in a dry run), local + remote.
+    pub deleted: usize,
 }
 
 /// Like [`clean`]; `force` deletes even while retention is paused by an anomaly.
@@ -448,14 +453,16 @@ pub async fn clean_with(
     config: &AppConfig,
     dry_run: bool,
     force: bool,
-) -> Result<()> {
+) -> Result<CleanSummary> {
+    let mut summary = CleanSummary::default();
     if !force {
         if let Some(reason) = crate::anomaly::retention_pause_reason(config) {
             warn!(
                 "Not deleting any backup: {}. Run `zesty-backup accept-changes` if this was expected, or `clean --force`.",
                 reason
             );
-            return Ok(());
+            summary.paused = true;
+            return Ok(summary);
         }
     }
     let policy = crate::retention::Policy::from_config(config);
@@ -486,8 +493,10 @@ pub async fn clean_with(
         if !reasons.is_empty() {
             debug!("Keeping local {} ({})", path.display(), reasons.join(", "));
         } else if dry_run {
+            summary.deleted += 1;
             info!("Would delete local {}", path.display());
         } else {
+            summary.deleted += 1;
             fs::remove_file(path)
                 .with_context(|| format!("Failed to delete {}", path.display()))?;
             info!("Deleted local {}", path.display());
@@ -495,7 +504,7 @@ pub async fn clean_with(
     }
 
     let Some(provider) = provider else {
-        return Ok(());
+        return Ok(summary);
     };
     let remote = remote_backups(provider).await?;
     let times: Vec<Option<DateTime<Utc>>> = remote
@@ -508,13 +517,15 @@ pub async fn clean_with(
         if !reasons.is_empty() {
             debug!("Keeping remote {} ({})", item.key, reasons.join(", "));
         } else if dry_run {
+            summary.deleted += 1;
             info!("Would delete remote {}", item.key);
         } else {
+            summary.deleted += 1;
             provider.delete(&item.key).await?;
             info!("Deleted remote {}", item.key);
         }
     }
-    Ok(())
+    Ok(summary)
 }
 
 pub fn human_size(bytes: u64) -> String {

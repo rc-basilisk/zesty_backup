@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use zesty_backup::alerts::{Alerter, Event, EventKind};
@@ -275,7 +275,7 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
     let alerter = Alerter::new(config.alerts.as_ref());
     match command {
         Commands::Backup { full } => {
-            backup_and_alert(std::sync::Arc::new(config), full, &alerter).await?;
+            backup_and_alert(Arc::new(config), full, &alerter).await?;
         }
         Commands::Upload { file } => {
             let result = async {
@@ -329,8 +329,8 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
             .await;
             if !dry_run {
                 alerter
-                    .notify(&Event::from_result(EventKind::Clean, &result, |_| {
-                        "old backups cleaned".to_string()
+                    .notify(&Event::from_result(EventKind::Clean, &result, |summary| {
+                        clean_summary_text(*summary)
                     }))
                     .await;
             }
@@ -362,18 +362,26 @@ async fn run_with_config(command: Commands, config: AppConfig, config_path: &str
             identity,
             keep,
         } => {
-            let provider = if local {
+            let provider: Option<Arc<dyn StorageProvider>> = if local {
                 None
             } else {
-                Some(providers::from_config(&config.storage).await?)
+                Some(Arc::from(providers::from_config(&config.storage).await?))
             };
-            let options = drill::DrillOptions {
-                backup: backup.as_deref(),
+            let job = DrillJob {
+                config: Arc::new(config),
+                provider,
+                backup,
                 local,
-                identity: identity.as_deref(),
+                identity,
                 keep,
             };
-            let outcome = drill::run(&config, provider.as_deref(), &options).await;
+            let outcome = tokio::select! {
+                outcome = job.spawn() => outcome?,
+                _ = shutdown_signal() => {
+                    drill::cleanup_interrupted();
+                    bail!("Interrupted: the drill's containers and restored files were removed");
+                }
+            };
             alerter
                 .notify(&Event::from_drill(
                     outcome.backup.as_deref(),
@@ -567,14 +575,14 @@ async fn run_daemon(
     }
 
     let alerter = Alerter::new(config.alerts.as_ref());
-    let provider = match providers::from_config(&config.storage).await {
-        Ok(p) => p,
+    let provider: Arc<dyn StorageProvider> = match providers::from_config(&config.storage).await {
+        Ok(p) => Arc::from(p),
         Err(e) => {
             alerter.notify(&Event::failure(EventKind::Upload, &e)).await;
             return Err(e);
         }
     };
-    let config = std::sync::Arc::new(config);
+    let config = Arc::new(config);
     info!(
         "Daemon started (PID {}): backup every {}h, upload + clean every {}h",
         std::process::id(),
@@ -607,23 +615,32 @@ async fn run_daemon(
     upload_timer.tick().await;
     run_upload(provider.as_ref(), &config, &alerter).await;
 
+    // Drills run on their own thread so a slow one can't hold up backups.
+    let mut drill_running: Option<std::thread::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             _ = backup_timer.tick() => run_backup(&config, &alerter).await,
             _ = upload_timer.tick() => run_upload(provider.as_ref(), &config, &alerter).await,
-            _ = drill_timer.tick(), if drill_hours.is_some() => run_drill(provider.as_ref(), &config, &alerter).await,
+            _ = drill_timer.tick(), if drill_hours.is_some() => {
+                if drill_running.as_ref().is_some_and(|h| !h.is_finished()) {
+                    warn!("Previous restore drill still running, skipping this one");
+                } else {
+                    drill_running = Some(start_scheduled_drill(provider.clone(), config.clone()));
+                }
+            }
         }
     }
 
     info!("Shutting down");
+    drill::cleanup_interrupted();
     if let Some(pid_file) = &pid_file {
         let _ = std::fs::remove_file(pid_file);
     }
     Ok(())
 }
 
-async fn run_backup(config: &std::sync::Arc<AppConfig>, alerter: &Alerter) {
+async fn run_backup(config: &Arc<AppConfig>, alerter: &Alerter) {
     if let Err(e) = backup_and_alert(config.clone(), false, alerter).await {
         error!("Scheduled backup failed: {:#}", e);
     }
@@ -631,7 +648,7 @@ async fn run_backup(config: &std::sync::Arc<AppConfig>, alerter: &Alerter) {
 
 /// Create a backup, run the anomaly checks, and report the result to the alert channels.
 async fn backup_and_alert(
-    config: std::sync::Arc<AppConfig>,
+    config: Arc<AppConfig>,
     full: bool,
     alerter: &Alerter,
 ) -> Result<PathBuf> {
@@ -658,25 +675,85 @@ fn describe_archive(path: &Path) -> String {
     )
 }
 
-async fn run_drill(provider: &dyn StorageProvider, config: &AppConfig, alerter: &Alerter) {
+/// A drill to run on its own thread, with its own runtime: it does blocking work
+/// (extraction, containers, user commands) that must not stall the async scheduler.
+struct DrillJob {
+    config: Arc<AppConfig>,
+    provider: Option<Arc<dyn StorageProvider>>,
+    backup: Option<String>,
+    local: bool,
+    identity: Option<PathBuf>,
+    keep: bool,
+}
+
+impl DrillJob {
+    fn run_blocking(self) -> drill::DrillOutcome {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to start the drill runtime");
+        let options = drill::DrillOptions {
+            backup: self.backup.as_deref(),
+            local: self.local,
+            identity: self.identity.as_deref(),
+            keep: self.keep,
+        };
+        runtime.block_on(drill::run(&self.config, self.provider.as_deref(), &options))
+    }
+
+    async fn spawn(self) -> Result<drill::DrillOutcome> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(self.run_blocking());
+        });
+        rx.await.context("the drill crashed")
+    }
+}
+
+fn start_scheduled_drill(
+    provider: Arc<dyn StorageProvider>,
+    config: Arc<AppConfig>,
+) -> std::thread::JoinHandle<()> {
     info!("Scheduled restore drill starting");
-    let outcome = drill::run(config, Some(provider), &drill::DrillOptions::default()).await;
-    alerter
-        .notify(&Event::from_drill(
-            outcome.backup.as_deref(),
-            &outcome.report,
-        ))
-        .await;
-    let backup = outcome.backup.as_deref().unwrap_or("(no backup)");
-    if outcome.report.passed() {
-        info!("Restore drill of {}: {}", backup, outcome.report.summary());
+    std::thread::spawn(move || {
+        let job = DrillJob {
+            config: config.clone(),
+            provider: Some(provider),
+            backup: None,
+            local: false,
+            identity: None,
+            keep: false,
+        };
+        let outcome = job.run_blocking();
+        let backup = outcome.backup.as_deref().unwrap_or("(no backup)");
+        if outcome.report.passed() {
+            info!("Restore drill of {}: {}", backup, outcome.report.summary());
+        } else {
+            error!(
+                "Restore drill of {}: {}\n{}",
+                backup,
+                outcome.report.summary(),
+                outcome.report
+            );
+        }
+        let alerter = Alerter::new(config.alerts.as_ref());
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            rt.block_on(alerter.notify(&Event::from_drill(
+                outcome.backup.as_deref(),
+                &outcome.report,
+            )));
+        }
+    })
+}
+
+fn clean_summary_text(summary: backup::CleanSummary) -> String {
+    if summary.paused {
+        "retention paused by an anomaly: nothing deleted".to_string()
     } else {
-        error!(
-            "Restore drill of {}: {}\n{}",
-            backup,
-            outcome.report.summary(),
-            outcome.report
-        );
+        format!("{} old backup(s) deleted", summary.deleted)
     }
 }
 

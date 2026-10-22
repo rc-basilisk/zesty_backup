@@ -59,32 +59,86 @@ fn history_path(config: &AppConfig) -> PathBuf {
     Path::new(&config.backup.local_backup_dir).join(HISTORY_FILE)
 }
 
-pub fn load_history(config: &AppConfig) -> Vec<BackupStats> {
-    fs::read_to_string(history_path(config))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+/// What is stored in the history file.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct History {
+    backups: Vec<BackupStats>,
+    /// Flagged backups not yet acknowledged with `accept-changes`. Kept separately from the
+    /// rolling `backups` window so the pause can't silently expire.
+    #[serde(default)]
+    unacknowledged: Vec<BackupStats>,
+}
+
+fn load(config: &AppConfig) -> History {
+    let Ok(text) = fs::read_to_string(history_path(config)) else {
+        return History::default();
+    };
+    serde_json::from_str::<History>(&text)
+        // Format of the first 2.1 development builds: a plain list.
+        .or_else(|_| {
+            serde_json::from_str::<Vec<BackupStats>>(&text).map(|backups| {
+                let unacknowledged = backups
+                    .iter()
+                    .filter(|b| !b.anomalies.is_empty())
+                    .cloned()
+                    .collect();
+                History {
+                    backups,
+                    unacknowledged,
+                }
+            })
+        })
         .unwrap_or_default()
 }
 
-fn save_history(config: &AppConfig, history: &[BackupStats]) -> Result<()> {
-    let start = history.len().saturating_sub(HISTORY_LEN);
+fn save(config: &AppConfig, history: &History) -> Result<()> {
+    let start = history.backups.len().saturating_sub(HISTORY_LEN);
+    let trimmed = History {
+        backups: history.backups[start..].to_vec(),
+        unacknowledged: history.unacknowledged.clone(),
+    };
     let path = history_path(config);
-    fs::write(&path, serde_json::to_string_pretty(&history[start..])?)
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&trimmed)?)
+        .and_then(|_| fs::rename(&tmp, &path))
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
+pub fn load_history(config: &AppConfig) -> Vec<BackupStats> {
+    load(config).backups
+}
+
 /// Compare `new` with the recent history, store it, and return what looks wrong.
-pub fn record(config: &AppConfig, mut new: BackupStats) -> Result<Vec<String>> {
+///
+/// If the history cannot be saved, that is reported as an anomaly too: without it, a
+/// flagged backup could not pause retention.
+pub fn record(config: &AppConfig, mut new: BackupStats) -> Vec<String> {
     let default = AnomalyConfig::default();
     let settings = config.anomaly.as_ref().unwrap_or(&default);
-    let mut history = load_history(config);
-    if settings.enabled.unwrap_or(true) {
-        new.anomalies = evaluate(settings, &history, &new);
+    if !settings.enabled.unwrap_or(true) {
+        return Vec::new();
     }
-    let anomalies = new.anomalies.clone();
-    history.push(new);
-    save_history(config, &history)?;
-    Ok(anomalies)
+    let mut history = load(config);
+    // Only backups that looked normal form the baseline.
+    let normal: Vec<BackupStats> = history
+        .backups
+        .iter()
+        .filter(|b| b.anomalies.is_empty())
+        .cloned()
+        .collect();
+    new.anomalies = evaluate(settings, &normal, &new);
+    if !new.anomalies.is_empty() {
+        history.unacknowledged.push(new.clone());
+    }
+    let mut anomalies = new.anomalies.clone();
+    history.backups.push(new);
+    if let Err(e) = save(config, &history) {
+        anomalies.push(format!(
+            "could not save the backup history, so anomalies can't be tracked: {:#}",
+            e
+        ));
+    }
+    anomalies
 }
 
 /// The rules. The baseline is the median of the last few backups, so one odd backup
@@ -174,7 +228,7 @@ pub fn evaluate(
     anomalies
 }
 
-/// Why retention is paused, if it is: the newest backup was flagged.
+/// Why retention is paused, if it is: a flagged backup has not been acknowledged.
 pub fn retention_pause_reason(config: &AppConfig) -> Option<String> {
     let pause = config
         .anomaly
@@ -184,26 +238,37 @@ pub fn retention_pause_reason(config: &AppConfig) -> Option<String> {
     if !pause {
         return None;
     }
-    let history = load_history(config);
-    let latest = history.last()?;
-    (!latest.anomalies.is_empty()).then(|| {
-        format!(
-            "the newest backup ({}) looked wrong: {}",
-            latest.name,
-            latest.anomalies.join("; ")
-        )
-    })
+    let history = load(config);
+    let first = history.unacknowledged.first()?;
+    let more = history.unacknowledged.len() - 1;
+    Some(format!(
+        "backup {} looked wrong ({}){}",
+        first.name,
+        first.anomalies.join("; "),
+        if more > 0 {
+            format!(", and {} later backup(s) too", more)
+        } else {
+            String::new()
+        }
+    ))
 }
 
-/// Accept the newest backup as normal: it becomes the only baseline and its flags are cleared.
+/// Accept the current state as normal: clears the flags and makes the newest backup the
+/// only baseline. Returns its name.
 pub fn accept(config: &AppConfig) -> Result<Option<String>> {
-    let mut history = load_history(config);
-    let Some(mut latest) = history.pop() else {
+    let mut history = load(config);
+    let Some(mut latest) = history.backups.pop() else {
         return Ok(None);
     };
     latest.anomalies.clear();
     let name = latest.name.clone();
-    save_history(config, &[latest])?;
+    save(
+        config,
+        &History {
+            backups: vec![latest],
+            unacknowledged: Vec::new(),
+        },
+    )?;
     Ok(Some(name))
 }
 
@@ -268,6 +333,32 @@ mod tests {
         // Data that never compressed (photos, videos) is not suspicious.
         let photos = vec![stats(1000, 100 * MB, 0, 97 * MB); 5];
         assert!(evaluate(&s, &photos, &stats(1000, 100 * MB, 0, 98 * MB)).is_empty());
+    }
+
+    #[test]
+    fn flagged_backups_never_become_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::AppConfig::parse(&format!(
+            "[storage]\nprovider = \"s3\"\n[backup]\nlocal_backup_dir = \"{}\"\nproject_path = \".\"\n",
+            dir.path().display()
+        ))
+        .unwrap();
+        for _ in 0..5 {
+            assert!(record(&config, stats(1000, 100 * MB, 0, 30 * MB)).is_empty());
+        }
+        // Ransomware: every following backup is incompressible. However many there are,
+        // they stay flagged and retention stays paused.
+        for _ in 0..8 {
+            let a = record(&config, stats(1000, 100 * MB, 0, 99 * MB));
+            assert!(!a.is_empty());
+        }
+        let reason = retention_pause_reason(&config).unwrap();
+        assert!(reason.contains("7 later backup(s)"), "{}", reason);
+        // A normal backup afterwards does not lift the pause either: only accept() does.
+        assert!(record(&config, stats(1000, 100 * MB, 0, 30 * MB)).is_empty());
+        assert!(retention_pause_reason(&config).is_some());
+        accept(&config).unwrap();
+        assert!(retention_pause_reason(&config).is_none());
     }
 
     #[test]

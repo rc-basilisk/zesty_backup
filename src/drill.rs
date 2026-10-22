@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -78,6 +79,89 @@ fn save_last(config: &AppConfig, outcome: &DrillOutcome) {
     }
 }
 
+/// Containers and work directories of drills in progress, so they can be removed if the
+/// process is interrupted (Ctrl-C, SIGTERM) before the normal cleanup runs.
+static ACTIVE_CONTAINERS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static ACTIVE_WORK_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Remove the containers and restored files of drills that are still running.
+/// Call this when shutting down because of a signal.
+pub fn cleanup_interrupted() {
+    let containers: Vec<_> = ACTIVE_CONTAINERS
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default();
+    for (runtime, name) in containers {
+        remove_container(&runtime, &name);
+    }
+    let dirs: Vec<_> = ACTIVE_WORK_DIRS
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default();
+    for dir in dirs {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+fn remove_container(runtime: &str, name: &str) {
+    let _ = Command::new(runtime)
+        .args(["rm", "-f", "-v", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Run `cmd`, killing it when it takes longer than `timeout`.
+fn output_with_timeout(
+    cmd: &mut Command,
+    stdin: Option<File>,
+    timeout: Duration,
+) -> Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    match stdin {
+        Some(f) => cmd.stdin(f),
+        None => cmd.stdin(Stdio::null()),
+    };
+    let mut child = cmd.spawn()?;
+    // Read both pipes in the background so a chatty process can't block on a full pipe.
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "timed out after {} (drill.step_timeout_minutes)",
+                crate::report::human_duration(timeout)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    Ok(Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
+fn step_timeout(drill: &DrillConfig) -> Duration {
+    Duration::from_secs(drill.step_timeout_minutes.unwrap_or(60).max(1) * 60)
+}
+
 pub async fn run(
     config: &AppConfig,
     provider: Option<&dyn StorageProvider>,
@@ -88,7 +172,12 @@ pub async fn run(
     let mut report = Report::new();
 
     let work = match work_dir(drill) {
-        Ok(dir) => dir,
+        Ok(dir) => {
+            if let Ok(mut dirs) = ACTIVE_WORK_DIRS.lock() {
+                dirs.push(dir.path().to_path_buf());
+            }
+            dir
+        }
         Err(e) => {
             report.fail("Work directory", format!("{:#}", e));
             return finish(config, report, None, None, options.keep);
@@ -141,7 +230,7 @@ pub async fn run(
     let encrypted = encryption::is_encrypted(&archive_path).unwrap_or(false);
     if encrypted && keys.identity_files.is_empty() && keys.passphrase.is_none() {
         report
-            .warn("Decrypt", "backup is encrypted and no key is available here: contents NOT checked")
+            .fail("Decrypt", "backup is encrypted and no key is available here: contents NOT checked")
             .hint("run the drill where the private key is (`--identity key.txt`), e.g. from your own machine");
         return finish(config, report, outcome_backup, Some(work), options.keep);
     }
@@ -221,6 +310,7 @@ pub async fn run(
             cmd.name.as_deref().unwrap_or(&cmd.run),
             &cmd.run,
             &restored,
+            step_timeout(drill),
             &mut report,
         );
     }
@@ -235,6 +325,9 @@ fn finish(
     work: Option<tempfile::TempDir>,
     keep: bool,
 ) -> DrillOutcome {
+    if let (Some(dir), Ok(mut dirs)) = (&work, ACTIVE_WORK_DIRS.lock()) {
+        dirs.retain(|d| d != dir.path());
+    }
     let kept_dir = match work {
         Some(dir) if keep => Some(dir.keep()),
         _ => None, // dropping the TempDir deletes everything
@@ -410,15 +503,17 @@ fn check_file_patterns(drill: &DrillConfig, files: &[String], report: &mut Repor
     }
 }
 
-fn run_command(name: &str, run: &str, restored: &Path, report: &mut Report) {
+fn run_command(name: &str, run: &str, restored: &Path, timeout: Duration, report: &mut Report) {
     let t = Timer::start();
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(run)
-        .current_dir(restored)
-        .env("ZESTY_RESTORE_DIR", restored)
-        .stdin(Stdio::null())
-        .output();
+    let output = output_with_timeout(
+        Command::new("sh")
+            .arg("-c")
+            .arg(run)
+            .current_dir(restored)
+            .env("ZESTY_RESTORE_DIR", restored),
+        None,
+        timeout,
+    );
     match output {
         Ok(out) if out.status.success() => {
             report.pass("Command", format!("{} ({})", name, t.elapsed()));
@@ -434,7 +529,7 @@ fn run_command(name: &str, run: &str, restored: &Path, report: &mut Report) {
             );
         }
         Err(e) => {
-            report.fail("Command", format!("{}: cannot run sh: {}", name, e));
+            report.fail("Command", format!("{}: {:#}", name, e));
         }
     }
 }
@@ -538,7 +633,18 @@ fn check_database(drill: &DrillConfig, kind: DbKind, restored: &Path, report: &m
             } else {
                 Engine::MySql
             };
-            restore_in_container(drill.runtime(), engine, &image, &dump, &checks, report);
+            restore_in_container(
+                drill.runtime(),
+                engine,
+                &image,
+                &dump,
+                &checks,
+                RestoreSettings {
+                    timeout: step_timeout(drill),
+                    allow_errors: drill.allow_restore_errors.unwrap_or(false),
+                },
+                report,
+            );
         }
         DbKind::Sqlite => sqlite_checks(&dump, &checks, report),
         other => {
@@ -571,9 +677,11 @@ fn runtime_available(runtime: &str) -> bool {
 
 /// Pick the image matching the server that made the dump, from the dump's header comments.
 pub fn default_image(kind: DbKind, dump: &Path) -> String {
-    let header = fs::read(dump)
-        .map(|b| String::from_utf8_lossy(&b[..b.len().min(4096)]).to_string())
-        .unwrap_or_default();
+    let mut head = Vec::new();
+    if let Ok(f) = File::open(dump) {
+        let _ = std::io::Read::read_to_end(&mut std::io::Read::take(f, 4096), &mut head);
+    }
+    let header = String::from_utf8_lossy(&head).to_string();
     image_from_header(kind, &header)
 }
 
@@ -618,30 +726,107 @@ const DRILL_PASSWORD: &str = "zesty-drill";
 struct Container {
     runtime: String,
     name: String,
+    timeout: Duration,
+}
+
+const LABEL: &str = "zesty-drill";
+
+/// Remove drill containers left behind by drills that were killed (their process is gone).
+fn remove_stale_containers(runtime: &str) {
+    let Ok(out) = Command::new(runtime)
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label={}", LABEL),
+            "--format",
+            "{{.Names}}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    for name in String::from_utf8_lossy(&out.stdout).lines() {
+        let pid = name
+            .strip_prefix("zesty-drill-")
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = pid {
+            if pid != std::process::id() && !process_alive(pid) {
+                warn!("Removing leftover drill container {}", name);
+                remove_container(runtime, name);
+            }
+        }
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    // Linux: a killed process can linger as a zombie, which `kill -0` still reports as alive.
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        let state = stat
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().next());
+        return !matches!(state, Some("Z") | Some("X"));
+    }
+    if Path::new("/proc/self/stat").exists() {
+        return false; // Linux, and no entry for that pid: gone
+    }
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true // can't tell: leave it alone
+    }
 }
 
 impl Container {
-    fn start(runtime: &str, image: &str, env: &[(&str, &str)]) -> Result<Self> {
+    fn start(runtime: &str, image: &str, env: &[(&str, &str)], timeout: Duration) -> Result<Self> {
+        remove_stale_containers(runtime);
         let name = format!(
             "zesty-drill-{}-{}",
             std::process::id(),
             Utc::now().timestamp_millis()
         );
         let mut cmd = Command::new(runtime);
-        cmd.args(["run", "-d", "--name", &name]);
+        // No network: nothing else on the host can reach the restored data; `exec` still works.
+        cmd.args([
+            "run",
+            "-d",
+            "--rm",
+            "--network",
+            "none",
+            "--label",
+            LABEL,
+            "--name",
+            &name,
+        ]);
         for (k, v) in env {
             cmd.arg("-e").arg(format!("{}={}", k, v));
         }
         cmd.arg(image);
-        let out = cmd
-            .stdin(Stdio::null())
-            .output()
-            .context("Failed to start container")?;
-        // Remove it in any case from here on.
+        if let Ok(mut active) = ACTIVE_CONTAINERS.lock() {
+            active.push((runtime.to_string(), name.clone()));
+        }
+        // Removed in any case from here on (Drop).
         let container = Self {
             runtime: runtime.to_string(),
             name,
+            timeout,
         };
+        // The first run downloads the image, which can take a while.
+        let out =
+            output_with_timeout(&mut cmd, None, timeout).context("Failed to start container")?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             let first = err
@@ -670,11 +855,11 @@ impl Container {
             cmd.arg("-e").arg(format!("{}={}", k, v));
         }
         cmd.arg(&self.name).args(args);
-        match stdin {
-            Some(path) => cmd.stdin(File::open(path)?),
-            None => cmd.stdin(Stdio::null()),
+        let stdin = match stdin {
+            Some(path) => Some(File::open(path)?),
+            None => None,
         };
-        cmd.output()
+        output_with_timeout(&mut cmd, stdin, self.timeout)
             .context("Failed to run a command in the drill container")
     }
 
@@ -710,12 +895,17 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = Command::new(&self.runtime)
-            .args(["rm", "-f", "-v", &self.name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        remove_container(&self.runtime, &self.name);
+        if let Ok(mut active) = ACTIVE_CONTAINERS.lock() {
+            active.retain(|(_, n)| n != &self.name);
+        }
     }
+}
+
+struct RestoreSettings {
+    timeout: Duration,
+    /// Errors while loading the dump are a warning instead of a failure.
+    allow_errors: bool,
 }
 
 fn restore_in_container(
@@ -724,6 +914,7 @@ fn restore_in_container(
     image: &str,
     dump: &Path,
     checks: &[String],
+    settings: RestoreSettings,
     report: &mut Report,
 ) {
     let t = Timer::start();
@@ -743,6 +934,7 @@ fn restore_in_container(
                 ("POSTGRES_PASSWORD", DRILL_PASSWORD),
                 ("POSTGRES_DB", "drill"),
             ],
+            settings.timeout,
         ),
         Engine::MySql => Container::start(
             runtime,
@@ -753,6 +945,7 @@ fn restore_in_container(
                 ("MYSQL_DATABASE", "drill"),
                 ("MARIADB_DATABASE", "drill"),
             ],
+            settings.timeout,
         ),
     };
     let container = match container {
@@ -868,7 +1061,16 @@ fn restore_in_container(
             .trim()
             .to_string())
     };
-    let tables = query(tables_sql).unwrap_or_default();
+    let tables = match query(tables_sql) {
+        Ok(t) => t,
+        Err(e) => {
+            report.fail(
+                "Database restore",
+                format!("could not query the restored database: {:#}", e),
+            );
+            return;
+        }
+    };
 
     let detail = format!(
         "{} table{} restored into {} in {}",
@@ -877,7 +1079,12 @@ fn restore_in_container(
         image,
         t.elapsed()
     );
-    if errors.is_empty() {
+    if !output.status.success() && errors.is_empty() {
+        report.fail(
+            "Database restore",
+            format!("loading the dump failed: {}", error_line(&stderr)),
+        );
+    } else if errors.is_empty() {
         if tables == "0" {
             report
                 .warn("Database restore", detail)
@@ -886,9 +1093,23 @@ fn restore_in_container(
             report.pass("Database restore", detail);
         }
     } else {
+        let status = if settings.allow_errors {
+            Status::Warn
+        } else {
+            Status::Fail
+        };
         report
-            .warn("Database restore", format!("{}, with {} error(s): {}", detail, errors.len(), errors.iter().take(2).copied().collect::<Vec<_>>().join(" | ")))
-            .hint("errors during restore usually mean a missing extension or role, or an image older than the server; set drill.database_image");
+            .add(
+                "Database restore",
+                status,
+                format!(
+                    "{}, with {} error(s): {}",
+                    detail,
+                    errors.len(),
+                    errors.iter().take(2).copied().collect::<Vec<_>>().join(" | ")
+                ),
+            )
+            .hint("usually a missing extension or role, or an image older than the server: set drill.database_image, or drill.allow_restore_errors = true if the errors are expected");
     }
 
     for sql in checks {
@@ -915,11 +1136,22 @@ fn restore_in_container(
 
 /// Roles that own objects (`ALTER … OWNER TO x;`) or get privileges (`GRANT … TO x;`) in a pg_dump.
 fn roles_in_dump(dump: &Path) -> BTreeSet<String> {
+    use std::io::BufRead;
     let mut roles = BTreeSet::new();
-    let Ok(content) = fs::read_to_string(dump) else {
+    let Ok(file) = File::open(dump) else {
         return roles;
     };
-    for line in content.lines() {
+    // Streamed line by line (dumps can be huge), tolerating non-UTF-8 data.
+    let mut reader = std::io::BufReader::new(file);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end();
         let names = if let Some(i) = line.find(" OWNER TO ") {
             &line[i + 10..]
         } else if line.starts_with("GRANT ") {
@@ -1018,6 +1250,28 @@ fn sqlite_checks(db: &Path, checks: &[String], report: &mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_steps_are_killed() {
+        let start = Instant::now();
+        let err = output_with_timeout(
+            Command::new("sh").arg("-c").arg("sleep 30"),
+            None,
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{}", err);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let ok = output_with_timeout(
+            Command::new("sh").arg("-c").arg("echo hi; echo oops >&2"),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ok.stdout), "hi\n");
+        assert_eq!(String::from_utf8_lossy(&ok.stderr), "oops\n");
+    }
 
     #[test]
     fn picks_error_line() {

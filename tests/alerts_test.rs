@@ -130,6 +130,25 @@ async fn success_only_pings_unless_asked() {
 }
 
 #[tokio::test]
+async fn only_new_backups_reset_the_dead_mans_switch() {
+    let (url, rx) = server(200);
+    let alerter = Alerter::new(Some(&all_channels(&url)));
+    // "0 backups uploaded" or a paused clean must not look like proof of life.
+    alerter
+        .notify(&Event::success(EventKind::Upload, "0 backup(s) uploaded"))
+        .await;
+    alerter
+        .notify(&Event::success(EventKind::Clean, "nothing deleted"))
+        .await;
+    assert!(drain(&rx).is_empty());
+    // Their failures still raise the alarm.
+    alerter
+        .notify(&Event::failure(EventKind::Clean, &anyhow::anyhow!("x")))
+        .await;
+    assert!(drain(&rx).iter().any(|r| r.path == "/hc/fail"));
+}
+
+#[tokio::test]
 async fn drills_do_not_count_as_backups() {
     let (url, rx) = server(200);
     let config = AlertsConfig {

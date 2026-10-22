@@ -199,7 +199,23 @@ where
     match (err.code(), err.message()) {
         (Some(code), Some(message)) => anyhow::anyhow!("{}: {}", code, message),
         (Some(code), None) => anyhow::anyhow!("{}", code),
-        _ => anyhow::anyhow!("{}", aws_sdk_s3::error::DisplayErrorContext(err)),
+        _ => {
+            use aws_sdk_s3::error::SdkError;
+            // The innermost cause is the useful part ("Connection refused", "dns error"...).
+            let mut root: &dyn std::error::Error = &err;
+            while let Some(source) = root.source() {
+                root = source;
+            }
+            let root = root.to_string();
+            match &err {
+                SdkError::DispatchFailure(_) => {
+                    anyhow::anyhow!("could not reach the S3 endpoint: {}", root)
+                }
+                SdkError::TimeoutError(_) => anyhow::anyhow!("S3 request timed out"),
+                _ if root != err.to_string() => anyhow::anyhow!("{}: {}", err, root),
+                _ => anyhow::anyhow!("{}", err),
+            }
+        }
     }
 }
 

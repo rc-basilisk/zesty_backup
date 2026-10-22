@@ -311,9 +311,7 @@ async fn check_remote_backups(
         return;
     };
     let name = &newest.key[REMOTE_PREFIX.len()..];
-    let created = newest
-        .last_modified
-        .or_else(|| backup::timestamp_from_name(name));
+    let created = backup::timestamp_from_name(name).or(newest.last_modified);
     let age_hours = created.map(|c| (Utc::now() - c).num_hours());
     let limit = 2 * config.backup.upload_interval_hours.unwrap_or(24) as i64;
     let detail = format!(

@@ -216,11 +216,11 @@ async fn drill_encrypted_backup() {
     let remote = DirProvider(fx.path("remote"));
     backup_and_upload(&config, &remote).await;
 
-    // Without the private key: the drill says clearly that it could not look inside.
+    // Without the private key: the drill fails, saying it could not look inside.
     let outcome = drill::run(&config, Some(&remote), &DrillOptions::default()).await;
     assert_eq!(
         status_of(&outcome.report, "Decrypt"),
-        vec![Status::Warn],
+        vec![Status::Fail],
         "{}",
         outcome.report
     );

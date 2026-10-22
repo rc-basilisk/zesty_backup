@@ -164,6 +164,9 @@ impl Alerter {
         let is_test = event.kind == EventKind::Test;
 
         // Dead-man's switch: successes keep it quiet, failures (and silence) raise the alarm.
+        // Only a newly created backup proves the system is alive; an upload of nothing or a
+        // paused clean must not keep the dead-man's switch quiet.
+        let counts_as_alive = matches!(event.kind, EventKind::Backup | EventKind::Test);
         let ping_url = if event.kind == EventKind::Drill {
             config
                 .healthchecks_drill_url
@@ -171,7 +174,10 @@ impl Alerter {
                 // Drill failures also flag the main check; drill successes don't count as backups.
                 .or(config.healthchecks_url.as_ref().filter(|_| !event.success))
         } else {
-            config.healthchecks_url.as_ref()
+            config
+                .healthchecks_url
+                .as_ref()
+                .filter(|_| !event.success || counts_as_alive)
         };
         if let Some(url) = ping_url {
             deliveries.push(Delivery {
@@ -226,7 +232,8 @@ impl Alerter {
             .body(truncate(&self.body(event), 10_000))
             .send()
             .await
-            .with_context(|| format!("request to {} failed", url))?;
+            .map_err(|e| e.without_url())
+            .with_context(|| format!("request to {} failed", host_of(&url)))?;
         check(response).await
     }
 
@@ -248,7 +255,12 @@ impl Alerter {
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
-        check(request.send().await.context("request to ntfy failed")?).await
+        let response = request
+            .send()
+            .await
+            .map_err(|e| e.without_url())
+            .with_context(|| format!("request to {} failed", host_of(url)))?;
+        check(response).await
     }
 
     async fn webhook(&self, url: &str, event: &Event) -> Result<()> {
@@ -265,7 +277,8 @@ impl Alerter {
             .json(&payload)
             .send()
             .await
-            .context("webhook request failed")?;
+            .map_err(|e| e.without_url())
+            .with_context(|| format!("request to {} failed", host_of(url)))?;
         check(response).await
     }
 }
@@ -279,14 +292,27 @@ async fn check(response: reqwest::Response) -> Result<()> {
     bail!("HTTP {}: {}", status, truncate(body.trim(), 300));
 }
 
-/// healthchecks.io: `<url>` signals success, `<url>/fail` failure.
+/// healthchecks.io: `<url>` signals success, `<url>/fail` failure (query string kept).
 pub fn healthchecks_url(base: &str, success: bool) -> String {
-    let base = base.trim_end_matches('/');
     if success {
-        base.to_string()
-    } else {
-        format!("{}/fail", base)
+        return base.trim_end_matches('/').to_string();
     }
+    match url::Url::parse(base) {
+        Ok(mut url) => {
+            let path = format!("{}/fail", url.path().trim_end_matches('/'));
+            url.set_path(&path);
+            url.to_string()
+        }
+        Err(_) => format!("{}/fail", base.trim_end_matches('/')),
+    }
+}
+
+/// Only the host: alert URLs often contain secrets (check UUIDs, topics, webhook tokens).
+fn host_of(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "the alert service".to_string())
 }
 
 /// Slack and Discord get their own message format; anything else gets structured JSON.
@@ -350,6 +376,14 @@ mod tests {
         assert_eq!(
             healthchecks_url("https://hc-ping.com/abc", false),
             "https://hc-ping.com/abc/fail"
+        );
+        assert_eq!(
+            healthchecks_url("https://hc-ping.com/key/slug?create=1", false),
+            "https://hc-ping.com/key/slug/fail?create=1"
+        );
+        assert_eq!(
+            host_of("https://hooks.slack.com/services/SECRET"),
+            "hooks.slack.com"
         );
     }
 
